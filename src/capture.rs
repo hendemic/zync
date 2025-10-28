@@ -7,8 +7,6 @@ use average_color;
 use serde::Deserialize;
 use anyhow::Result;
 
-
-
 #[derive(Deserialize)]
 pub struct ZoneConfig {
     x1: u32,
@@ -19,7 +17,7 @@ pub struct ZoneConfig {
 
 pub struct ZoneSample { pub r: u8, pub g: u8, pub b: u8}
 
-//This is a color sample from the screen. Its separate from ColorCommand because it implements differs_from, which takes ownership of a past ZoneSample
+//This is a color sample from the screen. Its separate from ColorCommand because it implements differs_from and both could have their own unique functions in the future.
 impl ZoneSample {
     pub fn new (r: u8, g: u8, b: u8) -> Self {
         ZoneSample{ r, g, b }
