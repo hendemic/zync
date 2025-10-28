@@ -1,10 +1,11 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
-use rumqttc::{Client, Connection, MqttOptions};
+use rumqttc::*;
 use serde::Deserialize;
 use anyhow::{Result, Context, bail};
 use std::fs;
 use dirs;
+use std::time::Duration;
 
 use crate::lights::LightConfig;
 use crate::capture::ZoneConfig;
@@ -23,7 +24,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    // loads the yaml file using dir for cross-platform compatibility, and serde_yaml to construct the AppConfig
+    /// loads the yaml file using dir for cross-platform compatibility, and serde_yaml to construct the AppConfig
     pub fn load() -> Result<Self> {
         let config_dir = dirs::config_dir()
             .context("Could not find config directory")?
@@ -51,8 +52,11 @@ impl AppConfig {
     # Sample configuration file for two lights and single zone covering full 1080p monitor
     # Enter mqtt options, define lights, and set zones that map to those lights in this file.
     mqtt:
+      name: "my-connection"
       broker: "192.168.1.100"
       port: 1883
+      user: "user name" (optional depending on broker config)
+      password: "password" (option depending on broker config)
 
     downsample_factor: 4
 
@@ -86,10 +90,17 @@ pub struct MQTTConfig {
     pub password: Option<String>,
 }
 
-
 impl MQTTConfig {
     // This is a wrapper around rumqttc that creates the client and connection from the MQTTConfig thats created during app configuration (AppConfig.load)
-    pub fn create_client(&self) -> Result<Client, Connection> {
-        todo!("Build out mqtt client and connection creation")
+    pub fn create_client(&self) -> Result<(Client, Connection)> {
+        let mut mqttoptions = MqttOptions::new(&self.name, &self.broker, 1883);
+        mqttoptions.set_keep_alive(Duration::from_secs(5));
+
+        if let (Some(user), Some(password)) = (&self.user, &self.password) {
+            mqttoptions.set_credentials(user, password);
+        }
+
+        let (client, connection) = Client::new(mqttoptions, 10);
+        Ok((client, connection))
     }
 }
