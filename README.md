@@ -37,7 +37,7 @@
     - performance: PerformanceConfig (implements from sync.rs)
     - fn load (loads TOML)
   - struct MqttClient
-    - broker, port, username, password
+    - name, broker, port, username, password
     - fn create_client (returns Client and Connection)
   - in the future most CLI config functions defined here. "run" will use the sync mod.
 
