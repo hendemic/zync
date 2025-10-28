@@ -60,10 +60,8 @@
 
 ### capture.rs
 - mod capture
-  - struct SamplingConfig
-    - downsample_factor, color_change_threshold
-  - struct ZoneConfig
   - struct ZoneSampler
+    - x1, y1, width, height
     - fn new
     - fn sample_screen (captures and returns LightSetting)
     - fn calculate_average_color
@@ -76,7 +74,7 @@
 ### sync.rs
 - mod sync
   - struct PerformanceConfig
-    - target_fps, min_fps, adaptive_framerate
+    - target_fps, min_fps, adaptive_framerate, refresh_threshold
   - struct ZoneMap
     - name, ScreenZone, lights (Vec<LightController>)
   - struct AdaptiveRate

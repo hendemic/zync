@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 mod config;
 mod lights;
+mod capture;
 
 fn main() {
     let mut mqttoptions = MqttOptions::new("zync-test", "192.168.10.20", 1883);

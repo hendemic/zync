@@ -4,9 +4,14 @@
 use rumqttc::{Client, QoS};
 use serde_json::json;
 use anyhow::Result;
+use serde::Deserialize;
+
+use crate::capture::ZoneSample;
 
 
 //this is used to format the payload for various services. HueAPI isn't zigbee but including it as I have plans to make it in scope as the application adds different connection types beyond MQTT
+//
+#[derive(Deserialize)]
 pub enum LightService {
     Zigbee2MQTT,
     ZHA,
@@ -14,36 +19,29 @@ pub enum LightService {
     HueAPI
 }
 
+#[derive(Deserialize)]
 pub struct LightConfig {
-    name: String,
-    service: LightService,
-    device_name: String,
-    max_brightness: u8,
+    pub name: String,
+    pub service: LightService,
+    pub device_name: String,
+    pub brightness: u8,
 }
 
-pub struct ColorCommand {
-    r: u8,
-    g: u8,
-    b: u8,
-    brightness: u8,
-}
+pub struct ColorCommand {r: u8, g: u8, b: u8}
 
 impl ColorCommand {
-    pub fn new(r: u8, g: u8, b: u8, brightness: u8) -> Self {
-        Self { r, g, b, brightness }
+    pub fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
     }
-    //In the future add a From method to directly use the ScreenSample. Leaving this method out until we have a working capture module to make testing easier with light commands.
-    // impl From<ScreenSample> for ColorCommand {
-    //     fn from(sample: ScreenSample) -> Self {
-    //         Self::new(sample.r, sample.g, sample.b, sample.brightness)
-    //     }
-    // }
 }
 
-pub struct LightController {
-    config: LightConfig,
-    client: Client,
+impl From<ZoneSample> for ColorCommand {
+    fn from(sample: ZoneSample) -> Self {
+        Self::new(sample.r, sample.g, sample.b)
+    }
 }
+
+pub struct LightController {config: LightConfig, client: Client}
 
 impl LightController {
     pub fn new(config: LightConfig, client: Client) -> Self {
@@ -66,7 +64,7 @@ impl LightController {
                 "g": color.g,
                 "b": color.b
             },
-            "brightness": color.brightness
+            "brightness": self.config.brightness
             });
 
         topic.to_string().into_bytes()
