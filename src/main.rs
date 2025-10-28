@@ -11,19 +11,15 @@ mod capture;
 
 fn main() -> Result<()> {
     //load configuration file
-    let config = AppConfig::load()
-        .context("Failed to load App configuration")?;
-    println!("Loaded config: broker={}:{}", config.mqtt.broker, config.mqtt.port);
-    println!("Lights: {:#?}", config.lights);
+    let config = AppConfig::load()?;
 
     //set connection
     let (client, mut connection) = config.mqtt.create_client()
         .context("Failed to create client")?;
-    client.subscribe("hello/rumqtt", QoS::AtMostOnce)?;
 
     // start notification thread
     thread::spawn(move || {
-        for (_i, notification) in connection.iter().enumerate() {
+        for notification in connection.iter().enumerate() {
             println!("Notification = {:?}", notification);
         }
     });

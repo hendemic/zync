@@ -55,15 +55,15 @@ impl AppConfig {
       name: "my-connection"
       broker: "192.168.1.100"
       port: 1883
-      user: "user name" (optional depending on broker config)
-      password: "password" (option depending on broker config)
+      user: "user name"         # optional depending on broker config
+      password: "password"      # optional depending on broker config
 
     downsample_factor: 4
 
     lights:
       - name: "desk_lamp_1"
         service: "Zigbee2MQTT"
-        device_name: "your_device_name"
+        device_name: "your_device_name"        # Must match the device name in Z2M
         brightness: 200
       - name: "desk_lamp_2"
         service: "Zigbee2MQTT"
