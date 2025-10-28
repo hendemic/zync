@@ -15,7 +15,6 @@ use crate::capture::ZoneSample;
 pub enum LightService {
     Zigbee2MQTT,
     ZHA,
-    ESPHome,
     HueAPI
 }
 
@@ -52,7 +51,6 @@ impl LightController {
         match self.config.service {
             LightService::Zigbee2MQTT => format!("zigbee2mqtt/{}/set", self.config.device_name),
             LightService::ZHA => format!("zigbee2mqtt/{}/set", self.config.device_name), //placeholder for now - just Z2M
-            LightService::ESPHome => format!("zigbee2mqtt/{}/set", self.config.device_name), //placeholder for now - just Z2M
             LightService::HueAPI => format!("zigbee2mqtt/{}/set", self.config.device_name), //placeholder for now - just Z2M
         }
     }
