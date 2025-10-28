@@ -75,6 +75,7 @@ impl LightController {
         let light = self.get_topic();
         let payload = self.format_payload(color, t);
 
+        println!("Topic: {t}", t = &light);
         self.client.try_publish(light, QoS::AtMostOnce, false, payload)
             .context("Failed to send light message")?;
 
