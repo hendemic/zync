@@ -1,4 +1,5 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use rumqttc::{Client, Connection, MqttOptions};
 use serde::Deserialize;
 use anyhow::{Result, Context, bail};
