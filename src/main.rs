@@ -1,4 +1,4 @@
-use rumqttc::QoS;
+
 use std::thread;
 use std::time::Duration;
 use anyhow::{Result, Context};
