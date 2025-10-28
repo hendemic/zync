@@ -3,14 +3,13 @@
 
 use rumqttc::{Client, QoS};
 use serde_json::json;
-use anyhow::Result;
+use anyhow::{Result, Context};
 use serde::Deserialize;
 
 use crate::capture::ZoneSample;
 
 
 //this is used to format the payload for various services. HueAPI isn't zigbee but including it as I have plans to make it in scope as the application adds different connection types beyond MQTT
-//
 #[derive(Deserialize)]
 pub enum LightService {
     Zigbee2MQTT,
@@ -74,7 +73,8 @@ impl LightController {
         let light = self.get_topic();
         let payload = self.format_payload(color, t);
 
-        self.client.try_publish(light, QoS::AtMostOnce, false, payload)?;
+        self.client.try_publish(light, QoS::AtMostOnce, false, payload)
+            .context("Failed to send light message")?;
         Ok(())
     }
 }
