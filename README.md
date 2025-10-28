@@ -33,7 +33,7 @@
   - struct AppConfig
     - mqtt: MqttClient
     - lights: Vec<LightConfig> (implements from lights.rs)
-    - screen: ScreenConfig (implements from capture.rs)
+    - screens: SamplingConfig (implements from capture.rs)
     - performance: PerformanceConfig (implements from sync.rs)
     - fn load (loads TOML)
   - struct MqttClient
@@ -60,14 +60,14 @@
 
 ### capture.rs
 - mod capture
-  - struct ScreenConfig
-    - downsample_factor, color_change_threshold, zones (hashmap of ScreenZone + Vec<LightConfig>)
-      - note: need to think through this more. I don't necessarily want lights and capture to be so dependent. but maybe its fine and I just put these in one file as two very related modules and call it a day. since capture defines the colors we're sending to lights, and zones/lights are tightly coupled and using generics and forcing these to be modular from one another seems like it makes these interfaces harder to use anyway.
-  - struct ScreenZone
+  - struct SamplingConfig
+    - downsample_factor, color_change_threshold
+  - struct ZoneConfig
+  - struct ZoneSampler
     - fn new
     - fn sample_screen (captures and returns LightSetting)
     - fn calculate_average_color
-  - struct LightSetting
+  - struct ScreenSample
     - r, g, b, brightness
     - fn new
     - fn from_color_auto_brightness
@@ -77,6 +77,8 @@
 - mod sync
   - struct PerformanceConfig
     - target_fps, min_fps, adaptive_framerate
+  - struct ZoneMap
+    - name, ScreenZone, lights (Vec<LightController>)
   - struct AdaptiveRate
     - target_interval, current_interval, consecutive_successes/failures
     - fn new (takes target_fps, min_fps)
