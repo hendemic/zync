@@ -10,14 +10,14 @@ use crate::capture::ZoneSample;
 
 
 //this is used to format the payload for various services. HueAPI isn't zigbee but including it as I have plans to make it in scope as the application adds different connection types beyond MQTT
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub enum LightService {
     Zigbee2MQTT,
     ZHA,
     HueAPI
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct LightConfig {
     pub name: String,
     pub service: LightService,
@@ -52,6 +52,8 @@ impl LightController {
             LightService::ZHA => format!("zigbee2mqtt/{}/set", self.config.device_name), //placeholder for now - just Z2M
             LightService::HueAPI => format!("zigbee2mqtt/{}/set", self.config.device_name), //placeholder for now - just Z2M
         }
+
+
     }
 
     pub fn format_payload(&self, color: ColorCommand, transition: f32) -> Vec<u8>{
@@ -75,6 +77,7 @@ impl LightController {
 
         self.client.try_publish(light, QoS::AtMostOnce, false, payload)
             .context("Failed to send light message")?;
+
         Ok(())
     }
 }

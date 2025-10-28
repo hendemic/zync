@@ -11,8 +11,8 @@ use anyhow::Result;
 #[derive(Deserialize)]
 pub struct ZoneConfig {
     //Add multiple monitor support here???
-    x1: u32,
-    y1: u32,
+    x: u32,
+    y: u32,
     width: u32,
     height: u32,
 }
