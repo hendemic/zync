@@ -55,22 +55,24 @@ impl LightController {
         }
     }
 
-    pub fn format_payload(&self, color: ColorCommand) -> Vec<u8>{
-        let topic = json!({
+    pub fn format_payload(&self, color: ColorCommand, transition: f32) -> Vec<u8>{
+        let payload = json!({
             "color": {
                 "r": color.r,
                 "g": color.g,
                 "b": color.b
             },
-            "brightness": self.config.brightness
+            "brightness": self.config.brightness,
+            "transition": transition
             });
 
-        topic.to_string().into_bytes()
+        payload.to_string().into_bytes()
     }
 
-    pub fn set_light(&mut self, color: ColorCommand) -> Result<()> {
+    pub fn set_light(&mut self, color: ColorCommand, transition: Option<f32>) -> Result<()> {
+        let t = transition.unwrap_or(0.0);
         let light = self.get_topic();
-        let payload = self.format_payload(color);
+        let payload = self.format_payload(color, t);
 
         self.client.try_publish(light, QoS::AtMostOnce, false, payload)?;
         Ok(())

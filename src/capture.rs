@@ -22,8 +22,18 @@ impl ZoneSample {
     pub fn new (r: u8, g: u8, b: u8) -> Self {
         ZoneSample{ r, g, b }
     }
+
+    //this function checks if any color channel exceeds a given threshold
+    //implemented in the sync module to determine if a message is required or not in order to reduce MQTT message overhead.
     pub fn differs_from (&self, other: &ZoneSample, threshold: u8) -> bool {
-        todo!("build out calculation ")
+        let diffs = (
+            self.r.abs_diff(other.r),
+            self.g.abs_diff(other.g),
+            self.b.abs_diff(other.b)
+        );
+        let max_diff = diffs.0.max(diffs.1).max(diffs.2);
+
+        max_diff > threshold
     }
 }
 
@@ -37,7 +47,7 @@ impl ZoneGrabber {
 
     pub fn sample (&self, downsample: u8) -> Result<ZoneSample> {
         //This function will handle screen shot, cropping to the zone, downsampling for mean calculation, and then mean calculation all in one.
-        todo!("build out sampling ")
+        todo!("build out sampling function")
     }
 
 }

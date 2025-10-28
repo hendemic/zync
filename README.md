@@ -75,6 +75,7 @@
 - mod sync
   - struct PerformanceConfig
     - target_fps, min_fps, adaptive_framerate, refresh_threshold
+    - fn calc_transition (calculates image transition from target_fps)
   - struct ZoneMap
     - name, ScreenZone, lights (Vec<LightController>)
   - struct AdaptiveRate
