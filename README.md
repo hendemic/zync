@@ -1,1 +1,1 @@
-This is a work in progress. Pure rust + MQTT monitor and light sync.
+This is a work in progress. Pure rust + MQTT display and light sync utility.
