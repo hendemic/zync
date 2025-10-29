@@ -72,7 +72,7 @@ impl ZoneSampler {
         )?;
 
         // Downsample image unless its smaller than 100x100.
-        // This is a starting point for future optimization on cut off for downsampling vs using snippet directly.
+        // TODO: do future optimization on cut off for downsampling vs using snippet directly.
         let snippet = if (snippet.width() * snippet.height()) > 10000 {
             image::imageops::resize(
                 &snippet,
@@ -85,6 +85,8 @@ impl ZoneSampler {
         };
 
         //Calculate average
+        // This is a pretty inefficient algorithm, and don't need to average every single pixel.
+        // TODO: Look into iterators in Rust book and see if I can only sample every Nth pixel, or implement another sampling algorithm
         let mut r_sum = 0u64;
         let mut g_sum = 0u64;
         let mut b_sum = 0u64;
