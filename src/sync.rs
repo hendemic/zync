@@ -42,11 +42,11 @@ impl AdaptiveRate {
         AdaptiveRate {target_interval, current_interval, consecutive_failures: 0, consecutive_successes: 0}
     }
 
-    pub fn on_success(&mut self) {
+    pub fn unthrottle(&mut self) {
         todo!("build out framerate increase algorithm")
     }
 
-    pub fn on_failure(&mut self) {
+    pub fn throttle(&mut self) {
         todo!("build out framerate decrease algorithm")
     }
 
@@ -54,7 +54,7 @@ impl AdaptiveRate {
         self.current_interval
     }
 
-    pub fn get_target_interval(&self) -> u64 {
+    pub fn get_target(&self) -> u64 {
         self.target_interval
     }
 
@@ -95,10 +95,10 @@ impl<'a> SyncEngine<'a> {
 
 
                 match area.zone_light.set_light(color, Some(transition)){
-                    Ok(_) => self.rate.on_success(),
+                    Ok(_) => self.rate.unthrottle(),
                     Err(e) => {
                         eprintln!("Failed to update light: {}", e);
-                        self.rate.on_failure();
+                        self.rate.throttle();
                     }
                 }
 
