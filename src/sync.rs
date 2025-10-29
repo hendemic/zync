@@ -77,7 +77,7 @@ impl<'a> SyncEngine<'a> {
         loop {
             for area in &mut self.zones {
                 // grab screen
-                let sample: ZoneSample = area.zone.sample(self.downsample)?;
+                let sample = area.zone.sample(self.downsample)?;
 
                 //check if we have a don't previous sample or if its meaningfully different to determine if we update the lights
                 let update = match &area.previous_sample {
