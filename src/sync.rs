@@ -104,6 +104,7 @@ impl<'a> SyncEngine<'a> {
 
                 area.previous_sample = Some(sample);
             }
+            thread::sleep(Duration::from_millis(self.rate.current_interval));
         }
     }
 }
