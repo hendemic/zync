@@ -1,6 +1,5 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
-
 use rumqttc::{Client, QoS};
 use serde_json::json;
 use anyhow::{Result, Context};
@@ -19,9 +18,8 @@ pub enum LightService {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct LightConfig {
-    pub name: String,
     pub service: LightService,
-    pub device_name: String,
+    pub light_name: String,
     pub brightness: u8,
 }
 
@@ -39,21 +37,19 @@ impl From<ZoneSample> for ColorCommand {
     }
 }
 
-pub struct LightController {config: LightConfig, client: Client}
+pub struct LightController <'a> {config: LightConfig, client: &'a Client}
 
-impl LightController {
-    pub fn new(config: LightConfig, client: Client) -> Self {
+impl<'a> LightController<'a> {
+    pub fn new(config: LightConfig, client: &'a Client) -> Self {
         LightController { config, client }
     }
 
     pub fn get_topic (&self) -> String {
         match self.config.service {
-            LightService::Zigbee2MQTT => format!("zigbee2mqtt/{}/set", self.config.device_name),
-            LightService::ZHA => format!("zigbee2mqtt/{}/set", self.config.device_name), //placeholder for now - just Z2M
-            LightService::HueAPI => format!("zigbee2mqtt/{}/set", self.config.device_name), //placeholder for now - just Z2M
+            LightService::Zigbee2MQTT => format!("zigbee2mqtt/{}/set", self.config.light_name),
+            LightService::ZHA => format!("zigbee2mqtt/{}/set", self.config.light_name), //placeholder for now - just Z2M
+            LightService::HueAPI => format!("zigbee2mqtt/{}/set", self.config.light_name), //placeholder for now - just Z2M
         }
-
-
     }
 
     pub fn format_payload(&self, color: ColorCommand, transition: f32) -> Vec<u8>{
@@ -76,7 +72,7 @@ impl LightController {
         let payload = self.format_payload(color, t);
 
         println!("Topic: {t}", t = &light);
-        self.client.try_publish(light, QoS::AtMostOnce, false, payload)
+        self.client.try_publish(light, QoS::AtLeastOnce, false, payload)
             .context("Failed to send light message")?;
 
         Ok(())

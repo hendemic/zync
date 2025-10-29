@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::lights::LightConfig;
 use crate::capture::ZoneConfig;
+use crate::sync::PerformanceConfig;
 
 
 // App config loads all of the configuratoin parameters for the app, including mqtt configs, the lights, zones, and global settings for the app.
@@ -20,7 +21,7 @@ pub struct AppConfig {
     pub lights: Vec<LightConfig>,
     pub zones: Vec<ZoneConfig>,
     downsample_factor: u8,
-    //pub performance: PerformanceConfig,
+    performance: PerformanceConfig,
 }
 
 impl AppConfig {
@@ -49,35 +50,35 @@ impl AppConfig {
 
     fn example_config() -> &'static str {
         r###"
-    # Sample configuration file for two lights and single zone covering full 1080p monitor
-    # Enter mqtt options, define lights, and set zones that map to those lights in this file.
-    mqtt:
-      name: "my-connection"
-      broker: "192.168.1.100"
-      port: 1883
-      user: "user name"         # optional depending on broker config
-      password: "password"      # optional depending on broker config
+# Sample configuration file for two lights and single zone covering full 1080p monitor
+# Enter mqtt options, define lights, and set zones that map to those lights in this file.
+mqtt:
+  name: "my-connection"
+  broker: "192.168.1.100"
+  port: 1883
+  user: "user name"         # optional depending on broker config
+  password: "password"      # optional depending on broker config
 
-    downsample_factor: 4
+downsample_factor: 4
 
-    lights:
-      - name: "desk_lamp_1"
-        service: "Zigbee2MQTT"
-        device_name: "your_device_name"        # Must match the device name in Z2M
-        brightness: 200
-      - name: "desk_lamp_2"
-        service: "Zigbee2MQTT"
-        device_name: "your_device_name"
-        brightness: 200
+lights:
+  - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
+    service: "Zigbee2MQTT"
+    brightness: 200
 
-    zones:
-      - name: "main_screen"
-        x: 0
-        y: 0
-        width: 1920
-        height: 1080
-        lights: ["desk_lamp_1", "desk_lamp_2]
-    "###
+zone:
+  - name: "main_screen"
+    x: 0
+    y: 0
+    width: 1920
+    height: 1080
+    light_name: "your_device_name"  # Must match device_name of the lights imported above
+
+performance:
+  target_fps: 10
+  min_fps: 1
+  refresh_threshold: 10
+"###
     }
 }
 
@@ -100,7 +101,7 @@ impl MQTTConfig {
             mqttoptions.set_credentials(user, password);
         }
 
-        let (client, connection) = Client::new(mqttoptions, 10);
+        let (client, connection) = Client::new(mqttoptions, 2); //use tiny cap for adaptive frame rate
         Ok((client, connection))
     }
 }

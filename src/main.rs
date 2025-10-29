@@ -1,12 +1,13 @@
 use std::thread;
 use std::time::Duration;
-use anyhow::{Result, Context};
+use anyhow::Result;
 
 use crate::config::AppConfig;
 use crate::lights::*;
 mod config;
 mod lights;
 mod capture;
+mod sync;
 
 fn main() -> Result<()> {
     //load configuration file
@@ -24,7 +25,7 @@ fn main() -> Result<()> {
 
     // test by changing a light with a single message
     let light_config = &config.lights[0];
-    let mut controller = LightController::new(light_config.clone(), client.clone());
+    let mut controller = LightController::new(light_config.clone(), &client);
 
     let color = ColorCommand::new(255, 0, 0);
     controller.set_light(color, Some(0.5))?;

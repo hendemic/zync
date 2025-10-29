@@ -2,19 +2,21 @@
 
 //use pure rust implementation instead of opencv
 use screenshots::Screen;
-use image::imageops;
-use average_color;
+use image::imageops::*;
+use image::DynamicImage;
 use serde::Deserialize;
 use anyhow::Result;
+use xcap::Monitor;
 
 /// rectangular zone on screen to sample color from
 #[derive(Deserialize)]
 pub struct ZoneConfig {
-    //Add multiple monitor support here???
+    //Add multiple monitor support here in future versions. Configure zone in yaml.
     x: u32,
     y: u32,
     width: u32,
     height: u32,
+    light_name: String,
 }
 
 /// This is a color sample from the screen. Its separate from ColorCommand because it implements differs_from and both could have their own unique functions in the future.
@@ -40,17 +42,67 @@ impl ZoneSample {
 }
 
 
-pub struct ZoneGrabber {zone: ZoneConfig}
+pub struct ZoneGrabber {
+    config: ZoneConfig,
+    monitor: Monitor,
+}
 
 impl ZoneGrabber {
-    pub fn new (zone: ZoneConfig) -> Self {
-        ZoneGrabber { zone }
-    }
+    pub fn new (config: ZoneConfig) -> Result<Self> {
+        // this simple version automatically grabs the primary display. Future versions will allow configuration of monitor in the yaml file, and this constructor will be a simple pass through of fields from ZoneConfig
+        let monitors = Monitor::all()?;
 
+        let monitor = monitors
+            .into_iter()
+            .find(|m| m.is_primary().unwrap_or(false))
+            .expect("No primary monitor found");
+
+        Ok(ZoneGrabber {config, monitor})
+
+    }
     /// captures average rgb values for a zone from downsampled crop
     pub fn sample (&self, downsample: u8) -> Result<ZoneSample> {
-        //This function will handle screen shot, cropping to the zone, downsampling for mean calculation, and then mean calculation all in one.
-        todo!("build out sampling function")
-    }
+        // This function will handle screen shot, cropping to the zone, downsampling for mean calculation, and then mean calculation all in one.
+        let sample = self.monitor.capture_region(
+            self.config.x,
+            self.config.y,
+            self.config.width,
+            self.config.height,
+        )?;
 
+        // Downsample image unless its smaller than 100x100. This is a starting point for future optimization,
+        // to test when downsampling adds too much overhead and its best to just use the image directly,
+        // vs when downsampling meanintfully speeds up peformance of average calculation.
+        let sample = if (sample.width() * sample.height()) > 10000 {
+            image::imageops::resize(
+                &sample,
+                sample.width() / (downsample as u32),
+                sample.height() / (downsample as u32),
+                FilterType::Nearest,
+            )
+        } else {
+            sample
+        };
+
+        //Calculate average
+        let rgb_image = DynamicImage::ImageRgba8(sample).to_rgb8(); // <-- this is some bullshit claude told me to do when I got stuck
+
+        let mut r_sum = 0u64;
+        let mut g_sum = 0u64;
+        let mut b_sum = 0u64;
+        let mut count = 0u64;
+
+        for pixel in rgb_image.pixels() {
+            r_sum += pixel[0] as u64;
+            g_sum += pixel[1] as u64;
+            b_sum += pixel[2] as u64;
+            count += 1;
+        }
+
+        Ok(ZoneSample {
+            r: (r_sum / count) as u8,
+            g: (g_sum / count) as u8,
+            b: (b_sum / count) as u8,
+        })
+    }
 }
