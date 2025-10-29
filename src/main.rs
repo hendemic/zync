@@ -9,6 +9,7 @@ mod lights;
 mod capture;
 mod sync;
 
+// This is current just a test of the config loading, and toggling a single light. Will update once I have sync fully defined.
 fn main() -> Result<()> {
     //load configuration file
     let config = AppConfig::load()?;
