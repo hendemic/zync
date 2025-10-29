@@ -84,15 +84,12 @@ impl ZoneSampler {
             snippet
         };
 
-        //Calculate average
-        let rgb_image = DynamicImage::ImageRgba8(snippet).to_rgb8(); // <-- this is some bullshit claude told me to do when I got stuck
-
         let mut r_sum = 0u64;
         let mut g_sum = 0u64;
         let mut b_sum = 0u64;
         let mut count = 0u64;
 
-        for pixel in rgb_image.pixels() {
+        for pixel in snippet.pixels() {
             r_sum += pixel[0] as u64;
             g_sum += pixel[1] as u64;
             b_sum += pixel[2] as u64;
