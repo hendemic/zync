@@ -25,7 +25,7 @@ fn main() -> Result<()> {
 
     // test by changing a light with a single message
     let light_config = &config.lights[0];
-    let mut controller = LightController::new(light_config.clone(), &client);
+    let controller = LightController::new(light_config.clone(), &client);
 
     let color = ColorCommand::new(255, 0, 0);
     controller.set_light(color, Some(0.5))?;

@@ -23,6 +23,7 @@
 - Spawn background thread for MQTT event loop
 - Initialize LightControllers (pass config.lights)
 - Initialize ScreenZone (pass config.screen)
+- Set up Vector of ZonePairs (relationships between Controllers and Screen Grabbers) to pass into SyncEngine
 - Initialize SyncEngine (pass controllers, zone, config.performance)
 - Handle graceful shutdown (Ctrl+C)
 - Run sync engine in main thread

@@ -44,7 +44,7 @@ impl<'a> LightController<'a> {
         LightController { config, client }
     }
 
-    pub fn get_topic (&self) -> String {
+    fn get_topic (&self) -> String {
         match self.config.service {
             LightService::Zigbee2MQTT => format!("zigbee2mqtt/{}/set", self.config.light_name),
             LightService::ZHA => format!("zigbee2mqtt/{}/set", self.config.light_name), //placeholder for now - just Z2M
@@ -52,7 +52,7 @@ impl<'a> LightController<'a> {
         }
     }
 
-    pub fn format_payload(&self, color: ColorCommand, transition: f32) -> Vec<u8>{
+    fn format_payload(&self, color: ColorCommand, transition: f32) -> Vec<u8>{
         let payload = json!({
             "color": {
                 "r": color.r,
@@ -66,7 +66,7 @@ impl<'a> LightController<'a> {
         payload.to_string().into_bytes()
     }
 
-    pub fn set_light(&mut self, color: ColorCommand, transition: Option<f32>) -> Result<()> {
+    pub fn set_light(&self, color: ColorCommand, transition: Option<f32>) -> Result<()> {
         let t = transition.unwrap_or(0.0);
         let light = self.get_topic();
         let payload = self.format_payload(color, t);

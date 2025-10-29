@@ -20,6 +20,7 @@ pub struct ZoneConfig {
 }
 
 /// This is a color sample from the screen. Its separate from ColorCommand because it implements differs_from and both could have their own unique functions in the future.
+#[derive(Clone, Copy)]
 pub struct ZoneSample { pub r: u8, pub g: u8, pub b: u8}
 
 impl ZoneSample {
