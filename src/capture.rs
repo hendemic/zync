@@ -1,6 +1,5 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
-//use pure rust implementation instead of opencv
 use screenshots::Screen;
 use image::imageops::*;
 use image::DynamicImage;
@@ -21,36 +20,37 @@ pub struct ZoneConfig {
 
 /// This is a color sample from the screen. Its separate from ColorCommand because it implements differs_from and both could have their own unique functions in the future.
 #[derive(Clone, Copy)]
-pub struct ZoneSample { pub r: u8, pub g: u8, pub b: u8}
+pub struct ZoneColor { pub r: u8, pub g: u8, pub b: u8}
 
-impl ZoneSample {
-    /// constructor for new ZoneSample
+impl ZoneColor {
+    /// constructor for new ZoneColor
     pub fn new (r: u8, g: u8, b: u8) -> Self {
-        ZoneSample{ r, g, b }
+        ZoneColor{ r, g, b }
     }
 
     ///this function checks if any color channel exceeds a given threshold
-    pub fn differs_from (&self, other: &ZoneSample, threshold: u8) -> bool {
+    pub fn differs_from (&self, other: &ZoneColor, threshold: u8) -> bool {
         let diffs = (
             self.r.abs_diff(other.r),
             self.g.abs_diff(other.g),
             self.b.abs_diff(other.b)
         );
+
         let max_diff = diffs.0.max(diffs.1).max(diffs.2);
 
         max_diff > threshold
     }
 }
 
-
-pub struct ZoneGrabber {
+///Used to sample a region on a monitor
+pub struct ZoneSampler {
     config: ZoneConfig,
     monitor: Monitor,
 }
 
-impl ZoneGrabber {
+impl ZoneSampler {
     pub fn new (config: ZoneConfig) -> Result<Self> {
-        // this simple version automatically grabs the primary display. Future versions will allow configuration of monitor in the yaml file, and this constructor will be a simple pass through of fields from ZoneConfig
+        // this simple version automatically grabs the primary display. Future updates will allow configuration of monitor in the .yaml file, and this constructor will be a simple pass through of fields from ZoneConfig. Lifted some of this code from screenshots crate example.
         let monitors = Monitor::all()?;
 
         let monitor = monitors
@@ -58,35 +58,34 @@ impl ZoneGrabber {
             .find(|m| m.is_primary().unwrap_or(false))
             .expect("No primary monitor found");
 
-        Ok(ZoneGrabber {config, monitor})
-
+        Ok(ZoneSampler {config, monitor})
     }
-    /// captures average rgb values for a zone from downsampled crop
-    pub fn sample (&self, downsample: u8) -> Result<ZoneSample> {
-        // This function will handle screen shot, cropping to the zone, downsampling for mean calculation, and then mean calculation all in one.
-        let sample = self.monitor.capture_region(
+
+    /// Captures average rgb values for a zone. Uses downsampling for larger zones.
+    pub fn sample (&self, downsample: u8) -> Result<ZoneColor> {
+
+        let snippet = self.monitor.capture_region(
             self.config.x,
             self.config.y,
             self.config.width,
             self.config.height,
         )?;
 
-        // Downsample image unless its smaller than 100x100. This is a starting point for future optimization,
-        // to test when downsampling adds too much overhead and its best to just use the image directly,
-        // vs when downsampling meanintfully speeds up peformance of average calculation.
-        let sample = if (sample.width() * sample.height()) > 10000 {
+        // Downsample image unless its smaller than 100x100.
+        // This is a starting point for future optimization on cut off for downsampling vs using snippet directly.
+        let snippet = if (snippet.width() * snippet.height()) > 10000 {
             image::imageops::resize(
-                &sample,
-                sample.width() / (downsample as u32),
-                sample.height() / (downsample as u32),
+                &snippet,
+                snippet.width() / (downsample as u32),
+                snippet.height() / (downsample as u32),
                 FilterType::Nearest,
             )
         } else {
-            sample
+            snippet
         };
 
         //Calculate average
-        let rgb_image = DynamicImage::ImageRgba8(sample).to_rgb8(); // <-- this is some bullshit claude told me to do when I got stuck
+        let rgb_image = DynamicImage::ImageRgba8(snippet).to_rgb8(); // <-- this is some bullshit claude told me to do when I got stuck
 
         let mut r_sum = 0u64;
         let mut g_sum = 0u64;
@@ -100,7 +99,7 @@ impl ZoneGrabber {
             count += 1;
         }
 
-        Ok(ZoneSample {
+        Ok(ZoneColor {
             r: (r_sum / count) as u8,
             g: (g_sum / count) as u8,
             b: (b_sum / count) as u8,

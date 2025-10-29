@@ -5,7 +5,7 @@ use serde_json::json;
 use anyhow::{Result, Context};
 use serde::Deserialize;
 
-use crate::capture::ZoneSample;
+use crate::capture::ZoneColor;
 
 
 //this is used to format the payload for various services. HueAPI isn't zigbee but including it as I have plans to make it in scope as the application adds different connection types beyond MQTT
@@ -23,16 +23,16 @@ pub struct LightConfig {
     pub brightness: u8,
 }
 
-pub struct ColorCommand {r: u8, g: u8, b: u8}
+pub struct MessageColor {r: u8, g: u8, b: u8}
 
-impl ColorCommand {
+impl MessageColor {
     pub fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
 }
 
-impl From<ZoneSample> for ColorCommand {
-    fn from(sample: ZoneSample) -> Self {
+impl From<ZoneColor> for MessageColor {
+    fn from(sample: ZoneColor) -> Self {
         Self::new(sample.r, sample.g, sample.b)
     }
 }
@@ -52,7 +52,7 @@ impl<'a> LightController<'a> {
         }
     }
 
-    fn format_payload(&self, color: ColorCommand, transition: f32) -> Vec<u8>{
+    fn format_payload(&self, color: MessageColor, transition: f32) -> Vec<u8>{
         let payload = json!({
             "color": {
                 "r": color.r,
@@ -66,14 +66,14 @@ impl<'a> LightController<'a> {
         payload.to_string().into_bytes()
     }
 
-    pub fn set_light(&self, color: ColorCommand, transition: Option<f32>) -> Result<()> {
+    pub fn set_light(&self, color: MessageColor, transition: Option<f32>) -> Result<()> {
         let t = transition.unwrap_or(0.0);
         let light = self.get_topic();
         let payload = self.format_payload(color, t);
 
         println!("Topic: {t}", t = &light);
-        self.client.try_publish(light, QoS::AtLeastOnce, false, payload)
-            .context("Failed to send light message")?;
+        self.client.try_publish(&light, QoS::AtLeastOnce, false, payload)
+            .with_context(|| format!("Failed to publish to topic {}", light))?;
 
         Ok(())
     }

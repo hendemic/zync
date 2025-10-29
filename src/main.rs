@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     let light_config = &config.lights[0];
     let controller = LightController::new(light_config.clone(), &client);
 
-    let color = ColorCommand::new(255, 0, 0);
+    let color = MessageColor::new(255, 0, 0);
     controller.set_light(color, Some(0.5))?;
 
     thread::sleep(Duration::from_secs(3));

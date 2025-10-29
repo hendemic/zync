@@ -82,6 +82,7 @@ performance:
     }
 }
 
+///This struct and its methods are essentially a wrapper for the rumqttc client.
 #[derive(Deserialize)]
 pub struct MQTTConfig {
     pub name: String,
