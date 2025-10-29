@@ -10,7 +10,7 @@ use xcap::Monitor;
 /// rectangular zone on screen to sample color from
 #[derive(Deserialize)]
 pub struct ZoneConfig {
-    //Add multiple monitor support here in future versions. Configure zone in yaml.
+    //Add multiple monitor support here in future versions. Configure zone in yaml. For now we're just using the primary monitor by default, but zones should be configurable by user by monitor.
     x: u32,
     y: u32,
     width: u32,
@@ -84,6 +84,7 @@ impl ZoneSampler {
             snippet
         };
 
+        //Calculate average
         let mut r_sum = 0u64;
         let mut g_sum = 0u64;
         let mut b_sum = 0u64;
