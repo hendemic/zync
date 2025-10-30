@@ -54,27 +54,40 @@ impl AdaptiveRate {
             consecutive_failures: 0,
             consecutive_successes: 0}
     }
+    /// After successful messages, this function increases the framerate back toward its target
+    /// It waits for a number of successful messages. Once its successfully sent 5 messages,
+    /// we can start increasing the message rate. This aims to be a simple AIMD-like network ping
+    /// that balances with a users perception of framerate/light changes.
     pub fn restore_framerate(&mut self) {
         let delta: i64 = self.current_interval as i64 - self.target_interval as i64;
 
         //if delta is negative or very close to the target, just set it to the target
-        if delta < 20 {
+        if delta <= 20 {
             self.current_interval = self.target_interval;
         }
 
         //otherwise, decreate current_interval by 20% of the delta
-        else if self.consecutive_successes > 5 {
-            self.current_interval = self.current_interval - (0.20 * delta as f32) as u64;
+        else if self.consecutive_successes > 3 {
+            self.current_interval = self.current_interval - (0.30 * delta as f32) as u64;
         }
 
         self.consecutive_successes += 1;
         self.consecutive_failures = 0;
     }
-
+    /// Refresh rate is dropped by 20ms each failure. If we've failed 10 times it sets it to the
+    /// max thats configured in order to wait for the mesh to recover.
     pub fn throttle_framerate(&mut self) {
-        // set max, and also use match pattern to do this for x amount of failures. after say 10 failures, we should go to the max and chill there until it recovers.
 
-        self.current_interval += 50;
+        if self.current_interval < self.max_interval {
+            self.current_interval = match self.consecutive_failures {
+                f if f < 10 => self.current_interval + 20,
+                _ => self.max_interval,
+            };
+        }
+        else {
+            self.current_interval = self.max_interval;
+        }
+
         self.consecutive_successes = 0;
         self.consecutive_failures += 1;
     }
