@@ -1,10 +1,16 @@
+## Overview
 This is a work in progress. Pure rust + MQTT display and light sync utility.
 
-X11 Linux only for now. Testing with Windows soon. Wayland is a long ways out.
+## Compatibility
+Z2M lights + X11 Linux only for now. Testing with Windows soon. Wayland is a long ways out.
 
+Tested with KDE Plasma X11 and Z2M hosted in an LXC with an SLZB-06 coodinator.
+
+## Usage
 To use, build with cargo. Create config.yaml at ~/.config/zync/config.yaml, or run the first time without a config and it should create a sample config file for you and panic. Edit it with your MQTT and light settings and start the program again.
 
-Sample yaml file
+
+#### Sample yaml file
 ```yaml
 # Sample configuration file for two lights and single zone covering full 1080p monitor
 # Enter mqtt options, define lights, and set zones that map to those lights in this file.
@@ -35,3 +41,12 @@ performance:
   max_delay: 2000                  #max recovery delay in ms before retrying connection
   refresh_threshold: 10
 ```
+
+## Known issues
+Dont use more than 2 zones -- currently an issue with screen capture. More than 3 or more could cause a lot of latency and may require you to adjust target fps.
+
+## Future plans
+- Optimization of sampling and averaging
+- Rework screen capture so additional zones don't add noteworthy latency
+- Windows compatibilty
+- Wayland is probably off the table until the xcap crate can support it or I understand async well enough to use other approaches!
