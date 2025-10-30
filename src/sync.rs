@@ -133,7 +133,7 @@ impl<'a> SyncEngine<'a> {
 
                 // send light command and handle rate adaption
                 let color = MessageColor::from(sample);
-                let transition: f32 = self.rate.current_interval as f32 / 1000.0;
+                let transition: f32 = self.rate.current_interval as f32 / 1000.0 * 2.0;
 
 
                 match area.zone_light.set_light(color, Some(transition)){

@@ -23,17 +23,19 @@ pub struct LightConfig {
     pub brightness: u8,
 }
 
-pub struct MessageColor {r: u8, g: u8, b: u8}
+pub struct MessageColor {r: u8, g: u8, b: u8, brightness: u8}
 
 impl MessageColor {
-    pub fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
+    pub fn new(r: u8, g: u8, b: u8, brightness: u8) -> Self {
+        Self { r, g, b, brightness }
     }
 }
 
 impl From<ZoneColor> for MessageColor {
     fn from(sample: ZoneColor) -> Self {
-        Self::new(sample.r, sample.g, sample.b)
+        let brightness = ((0.299 * sample.r as f32) + (0.587  * sample.g as f32) + (0.114 * sample.b as f32)) as u8;
+
+        Self::new(sample.r, sample.g, sample.b, brightness)
     }
 }
 
@@ -61,7 +63,7 @@ impl<'a> LightController<'a> {
                 "g": color.g,
                 "b": color.b
             },
-            "brightness": self.config.brightness,
+            "brightness": color.brightness,
             "transition": transition
             });
 
@@ -74,7 +76,7 @@ impl<'a> LightController<'a> {
         let payload = self.format_payload(color, t);
 
         println!("Topic: {t}", t = &light);
-        self.client.try_publish(&light, QoS::AtLeastOnce, false, payload)
+        self.client.try_publish(&light, QoS::AtMostOnce, false, payload)
             .with_context(|| format!("Failed to publish to topic {}", light))?;
 
         Ok(())
