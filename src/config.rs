@@ -59,7 +59,7 @@ mqtt:
   user: "user name"         # optional depending on broker config
   password: "password"      # optional depending on broker config
 
-downsample_factor: 4
+downsample_factor: 10
 
 lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light

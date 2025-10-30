@@ -67,7 +67,7 @@ impl ZoneSampler {
     /// Captures average rgb values for a zone. Uses downsampling for larger zones.
     pub fn sample (&self, downsample: u8) -> Result<ZoneColor> {
 
-        let time1 = Instant::now();
+        //let time1 = Instant::now();
 
         // Takes 20-25ms! There's really no way around this without getting more sophisticated as we're just using a screenshot.
         // TODO: Make a separate capture function that captures the whole screen and passes the full image into ZoneSamplers.
@@ -92,7 +92,7 @@ impl ZoneSampler {
 
 
         // Downsample image unless its smaller than 100x100.
-        // 30-90 micro seconds.
+        // 90-600 micro seconds depending on downsample factor
         // TODO: Apply downsampling in averaging calculation by skipping pixels. Should save time.
         let snippet = if (snippet.width() * snippet.height()) > 10000 {
             image::imageops::resize(
@@ -106,11 +106,11 @@ impl ZoneSampler {
         };
         //println!("Resize time: {}micro sec", time3.elapsed().as_micros());
 
-        let time4 = Instant::now();
+        //let time4 = Instant::now();
 
         // Calculate average
         // This is calculation isn't ideal. Don't need to average every single pixel.
-        // This works for a POC, and confirmed it is the shortest operation at 90-100 nanos.
+        // This works for a POC, and confirmed it is the shortest operation at 90 nanos at 100 downsample, 1.4 micro sec at 20, 5.5 micro sec at 10
         // TODO: Look into iterators in Rust book. If I can sample every Nth pixel, I can save time here and in downsampling/resizing.
         let mut r_sum = 0u64;
         let mut g_sum = 0u64;
