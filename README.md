@@ -49,4 +49,5 @@ Dont use more than 2 zones -- currently an issue with screen capture. More than 
 - Optimization of sampling and averaging
 - Rework screen capture so additional zones don't add noteworthy latency
 - Windows compatibilty
+- Test adaptive framerate. I have a hunch its not actually working.
 - Wayland is probably off the table until the xcap crate can support it or I understand async well enough to use other approaches!
