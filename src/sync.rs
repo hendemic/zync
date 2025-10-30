@@ -10,7 +10,7 @@ use crate::lights::{MessageColor, LightController};
 #[derive(Deserialize)]
 pub struct PerformanceConfig {
     target_fps: u8,
-    min_fps: u8,
+    max_delay: u64,
     refresh_threshold: u8,
 }
 
@@ -31,21 +31,52 @@ impl<'a> ZonePair<'a> {
 pub struct AdaptiveRate {
     target_interval: u64,
     current_interval: u64,
+    max_interval: u64,
     consecutive_failures: u16,
     consecutive_successes: u16,
 }
 
 impl AdaptiveRate {
-    pub fn new (target_interval: u64, current_interval: u64) -> Self {
-        AdaptiveRate {target_interval, current_interval, consecutive_failures: 0, consecutive_successes: 0}
+    pub fn new (target_interval: u64, current_interval: u64, max_interval: u64) -> Self {
+        AdaptiveRate {
+            target_interval,
+            current_interval,
+            max_interval,
+            consecutive_failures: 0,
+            consecutive_successes: 0,
+        }
     }
-
+    pub fn new_from_fps (fps: u64, max_interval: u64) -> Self {
+        AdaptiveRate {
+            target_interval: 1000 / fps,
+            current_interval: 1000 / fps,
+            max_interval,
+            consecutive_failures: 0,
+            consecutive_successes: 0}
+    }
     pub fn restore_framerate(&mut self) {
-        todo!("build out framerate increase algorithm")
+        let delta: i64 = self.current_interval as i64 - self.target_interval as i64;
+
+        //if delta is negative or very close to the target, just set it to the target
+        if delta < 20 {
+            self.current_interval = self.target_interval;
+        }
+
+        //otherwise, decreate current_interval by 20% of the delta
+        else if self.consecutive_successes > 5 {
+            self.current_interval = self.current_interval - (0.20 * delta as f32) as u64;
+        }
+
+        self.consecutive_successes += 1;
+        self.consecutive_failures = 0;
     }
 
     pub fn throttle_framerate(&mut self) {
-        todo!("build out framerate decrease algorithm")
+        // set max, and also use match pattern to do this for x amount of failures. after say 10 failures, we should go to the max and chill there until it recovers.
+
+        self.current_interval += 50;
+        self.consecutive_successes = 0;
+        self.consecutive_failures += 1;
     }
 
     pub fn get_interval(&self) -> u64 {

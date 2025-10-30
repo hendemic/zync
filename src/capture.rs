@@ -84,9 +84,10 @@ impl ZoneSampler {
             snippet
         };
 
-        //Calculate average
+        // Calculate average
         // This is a pretty inefficient algorithm, and don't need to average every single pixel.
-        // TODO: Look into iterators in Rust book and see if I can only sample every Nth pixel, or implement another sampling algorithm
+        // This works for a POC, and can test the program overall. I'm sure this doesn't add more than a few ms of latency anyway.
+        // TODO: Look into iterators in Rust book and see if I can only sample every Nth pixel, or implement another sampling algorithm.
         let mut r_sum = 0u64;
         let mut g_sum = 0u64;
         let mut b_sum = 0u64;

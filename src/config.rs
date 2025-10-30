@@ -76,7 +76,7 @@ zone:
 
 performance:
   target_fps: 10
-  min_fps: 1
+  max_delay: 2000                  #max recovery delay in ms before retrying connection
   refresh_threshold: 10
 "###
     }
