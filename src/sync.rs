@@ -1,8 +1,7 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::thread;
 use serde::Deserialize;
-use anyhow::{Result, Context};
+use anyhow::{Result};
 
 use crate::capture::{ZoneSampler, ZoneColor};
 use crate::lights::{MessageColor, LightController};
@@ -37,6 +36,7 @@ pub struct AdaptiveRate {
 }
 
 impl AdaptiveRate {
+    #[allow(dead_code)] // not using new. keeping for testing.
     pub fn new (target_interval: u64, current_interval: u64, max_interval: u64) -> Self {
         AdaptiveRate {
             target_interval,
@@ -54,11 +54,11 @@ impl AdaptiveRate {
             consecutive_failures: 0,
             consecutive_successes: 0}
     }
-    /// After successful messages, this function increases the framerate back toward its target
-    /// It waits for a number of successful messages. Once its successfully sent 5 messages,
+    /// After successful messages, this function increases the framerate back toward its target.
+    /// It waits for a number of successful messages. Once its successfully sent enough messages,
     /// we can start increasing the message rate. This aims to be a simple AIMD-like network ping
-    /// that balances with a users perception of framerate/light changes.
-    pub fn restore_framerate(&mut self) {
+    /// balances with a users perception of framerate/light changes to not abruptly slow/start.
+    fn restore_framerate(&mut self) {
         let delta: i64 = self.current_interval as i64 - self.target_interval as i64;
 
         //if delta is negative or very close to the target, just set it to the target
@@ -76,7 +76,7 @@ impl AdaptiveRate {
     }
     /// Refresh rate is dropped by 20ms each failure. If we've failed 10 times it sets it to the
     /// max thats configured in order to wait for the mesh to recover.
-    pub fn throttle_framerate(&mut self) {
+    fn throttle_framerate(&mut self) {
 
         if self.current_interval < self.max_interval {
             self.current_interval = match self.consecutive_failures {
@@ -91,13 +91,15 @@ impl AdaptiveRate {
         self.consecutive_successes = 0;
         self.consecutive_failures += 1;
     }
+    fn adjust_timing(&self, work_time: u64) -> u64 {
+        let adjust: i64 = self.current_interval as i64 - work_time as i64;
 
-    pub fn get_interval(&self) -> u64 {
-        self.current_interval
-    }
-
-    pub fn get_target(&self) -> u64 {
-        self.target_interval
+        if adjust > 0 {
+            (self.current_interval - work_time) as u64
+        } else {
+            println!("Caution: High latency. Adjust zone, lights, downsample, and/or FPS.");
+            0
+        }
     }
 
 }
@@ -115,9 +117,10 @@ impl<'a> SyncEngine<'a> {
     }
 
     pub fn run(&mut self) -> Result<()>{
-        // start loop
         loop {
+            let now = Instant::now();
             for area in &mut self.zones {
+
                 // grab screen
                 let sample = area.zone.sample(self.downsample)?;
 
@@ -145,7 +148,8 @@ impl<'a> SyncEngine<'a> {
                 }
                 area.previous_sample = Some(sample);
             }
-            thread::sleep(Duration::from_millis(self.rate.current_interval));
+            let elapsed_time = now.elapsed().as_millis() as u64;
+            thread::sleep(Duration::from_millis(self.rate.adjust_timing(elapsed_time)));
         }
     }
 }

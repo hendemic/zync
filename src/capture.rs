@@ -1,11 +1,10 @@
 #![allow(dead_code, unused_imports, unused_variables)]
-
-//use screenshots::Screen;
 use image::imageops::*;
 use image::DynamicImage;
 use serde::Deserialize;
 use anyhow::Result;
 use xcap::*;
+use std::time::{Duration, Instant};
 
 /// rectangular zone on screen to sample color from
 #[derive(Deserialize)]
@@ -68,7 +67,16 @@ impl ZoneSampler {
     /// Captures average rgb values for a zone. Uses downsampling for larger zones.
     pub fn sample (&self, downsample: u8) -> Result<ZoneColor> {
 
+        let time1 = Instant::now();
+
+        // Takes 20-25ms! There's really no way around this without getting more sophisticated as we're just using a screenshot.
+        // TODO: Make a separate capture function that captures the whole screen and passes the full image into ZoneSamplers.
+        // If we have 2-3 Zones this can hurt performance a lot!
         let mut full_image = self.monitor.capture_image()?;
+        //println!("Capture time: {}ms", time1.elapsed().as_millis());
+
+
+        let time2 = Instant::now();
         let snippet = image::imageops::crop(
             &mut full_image,
             self.config.x,
@@ -77,8 +85,15 @@ impl ZoneSampler {
             self.config.height,
         ).to_image();
 
+        //println!("Crop time: {}ms", time2.elapsed().as_nanos());
+
+
+        //let time3 = Instant::now();
+
+
         // Downsample image unless its smaller than 100x100.
-        // TODO: do future optimization on cut off for downsampling vs using snippet directly.
+        // 30-90 micro seconds.
+        // TODO: Apply downsampling in averaging calculation by skipping pixels. Should save time.
         let snippet = if (snippet.width() * snippet.height()) > 10000 {
             image::imageops::resize(
                 &snippet,
@@ -89,11 +104,14 @@ impl ZoneSampler {
         } else {
             snippet
         };
+        //println!("Resize time: {}micro sec", time3.elapsed().as_micros());
+
+        let time4 = Instant::now();
 
         // Calculate average
-        // This is a pretty inefficient algorithm, and don't need to average every single pixel.
-        // This works for a POC, and can test the program overall. I'm sure this doesn't add more than a few ms of latency anyway.
-        // TODO: Look into iterators in Rust book and see if I can only sample every Nth pixel, or implement another sampling algorithm.
+        // This is calculation isn't ideal. Don't need to average every single pixel.
+        // This works for a POC, and confirmed it is the shortest operation at 90-100 nanos.
+        // TODO: Look into iterators in Rust book. If I can sample every Nth pixel, I can save time here and in downsampling/resizing.
         let mut r_sum = 0u64;
         let mut g_sum = 0u64;
         let mut b_sum = 0u64;
@@ -105,6 +123,9 @@ impl ZoneSampler {
             b_sum += pixel[2] as u64;
             count += 1;
         }
+
+        //println!("Averaging time: {} nano secs", time4.elapsed().as_nanos());
+        //println!("Total image capture and process time: {}ms", time1.elapsed().as_millis());
 
         Ok(ZoneColor {
             r: (r_sum / count) as u8,

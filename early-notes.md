@@ -17,17 +17,13 @@
 
 ## Module Definition
 ### main.rs
-- Parse CLI arguments
-- Load AppConfig from config.rs
-- Extract config.mqtt and create MQTT client/connection
-- Spawn background thread for MQTT event loop
-- Initialize LightControllers (pass config.lights)
-- Initialize ScreenZone (pass config.screen)
-- Set up Vector of ZonePairs (relationships between Controllers and Screen Grabbers) to pass into SyncEngine
-- Initialize SyncEngine (pass controllers, zone, config.performance)
-- Handle graceful shutdown (Ctrl+C)
-- Run sync engine in main thread
-- Error reporting to user
+1. Load AppConfig from TOML (config.rs)
+2. Extract pieces:
+   - config.mqtt → create MQTT client/connection
+   - config.lights → create Vec<LightController>
+   - config.screen → create ScreenZone
+   - config.performance → pass to SyncEngine
+3. Run SyncEngine with constructed components
 
 ### config.rs
 - mod config (note: read rust book on generic types and use those here. decide if I need to make this modular from concrete config types/structs defined in other mods. There is an argument not to since config is specific to the app and I won't really use these with any other types/structrs from those defined here...)
@@ -93,16 +89,3 @@
     - fn new (takes Vec<LightController>, ScreenZone, PerformanceConfig)
     - fn run (main sync loop - runs in main thread)
       - Loop: sample screen → publish to lights → handle success/failure → sleep
-
-## Thread Architecture
-- **Main Thread:** Runs SyncEngine.run() - screen capture, color calculation, publishing commands
-- **Background Thread:** Runs connection.iter() - MQTT network I/O, keeps connection alive
-
-## Data Flow
-1. Load AppConfig from TOML (config.rs)
-2. Extract pieces:
-   - config.mqtt → create MQTT client/connection
-   - config.lights → create Vec<LightController>
-   - config.screen → create ScreenZone
-   - config.performance → pass to SyncEngine
-3. Run SyncEngine with constructed components
