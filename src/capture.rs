@@ -1,11 +1,11 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
-use screenshots::Screen;
+//use screenshots::Screen;
 use image::imageops::*;
 use image::DynamicImage;
 use serde::Deserialize;
 use anyhow::Result;
-use xcap::Monitor;
+use xcap::*;
 
 /// rectangular zone on screen to sample color from
 #[derive(Deserialize)]
@@ -61,15 +61,21 @@ impl ZoneSampler {
         Ok(ZoneSampler {config, monitor})
     }
 
+    pub fn get_light_name(&self) -> String {
+        self.config.light_name.clone()
+    }
+
     /// Captures average rgb values for a zone. Uses downsampling for larger zones.
     pub fn sample (&self, downsample: u8) -> Result<ZoneColor> {
 
-        let snippet = self.monitor.capture_region(
+        let mut full_image = self.monitor.capture_image()?;
+        let snippet = image::imageops::crop(
+            &mut full_image,
             self.config.x,
             self.config.y,
             self.config.width,
             self.config.height,
-        )?;
+        ).to_image();
 
         // Downsample image unless its smaller than 100x100.
         // TODO: do future optimization on cut off for downsampling vs using snippet directly.

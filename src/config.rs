@@ -20,8 +20,8 @@ pub struct AppConfig {
     pub mqtt: MQTTConfig,
     pub lights: Vec<LightConfig>,
     pub zones: Vec<ZoneConfig>,
-    downsample_factor: u8,
-    performance: PerformanceConfig,
+    pub downsample_factor: u8,
+    pub performance: PerformanceConfig,
 }
 
 impl AppConfig {

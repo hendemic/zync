@@ -43,7 +43,9 @@ impl<'a> LightController<'a> {
     pub fn new(config: LightConfig, client: &'a Client) -> Self {
         LightController { config, client }
     }
-
+    pub fn get_light_name (&self) -> String {
+        self.config.light_name.clone()
+    }
     fn get_topic (&self) -> String {
         match self.config.service {
             LightService::Zigbee2MQTT => format!("zigbee2mqtt/{}/set", self.config.light_name),

@@ -9,9 +9,9 @@ use crate::lights::{MessageColor, LightController};
 
 #[derive(Deserialize)]
 pub struct PerformanceConfig {
-    target_fps: u8,
-    max_delay: u64,
-    refresh_threshold: u8,
+    pub target_fps: u64,
+    pub max_delay: u64,
+    pub refresh_threshold: u8,
 }
 
 /// This is handles a zone and its cooresponding lights. Defined here to maintain independence between light and capture modules.
