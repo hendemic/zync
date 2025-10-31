@@ -3,7 +3,7 @@ use anyhow::Result;
 use rumqttc::Client;
 use std::collections::HashMap;
 
-use crate::capture::{ZoneConfig, ZoneSampler};
+use crate::capture::{ZoneConfig, ZoneSampler, ScreenCapture};
 use crate::config::AppConfig;
 use crate::lights::*;
 use crate::sync::{AdaptiveRate, SyncEngine, ZonePair};
@@ -14,19 +14,16 @@ mod sync;
 
 // This is current just a test of the config loading, and toggling a single light. Will update once I have sync fully defined.
 fn main() -> Result<()> {
-    //load configuration file
+
     let config = AppConfig::load()?;
-
-    //set connection
     let (client, mut connection) = config.mqtt.create_client()?;
-
-    //initialize programs objects
     let adaptive_rate = AdaptiveRate::new_from_fps(
                             config.performance.target_fps,
                             config.performance.max_delay
     );
     let zone_map = extract_zones_and_lights(config.lights, config.zones, &client)?;
-    let mut engine = SyncEngine::new(zone_map, adaptive_rate, config.performance, config.downsample_factor);
+    let screen = ScreenCapture::new()?;
+    let mut engine = SyncEngine::new(screen, zone_map, adaptive_rate, config.performance, config.downsample_factor);
 
     // start notification thread
     thread::spawn(move || {

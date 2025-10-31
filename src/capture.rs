@@ -1,15 +1,43 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 use image::imageops::*;
 use image::DynamicImage;
+use image::ImageBuffer;
+use image::Rgba;
+use image::RgbaImage;
 use serde::Deserialize;
 use anyhow::Result;
 use xcap::*;
 use std::time::{Duration, Instant};
 
+
+/// Handles screen capture. Currently just supports stills. Will be the struct that contains future vid feed on Windows and Wayland
+pub struct ScreenCapture {
+    monitor: Monitor,
+}
+
+impl ScreenCapture {
+    pub fn new() -> Result<Self> {
+        // Add multiple monitor support here in future versions. Configure zone in yaml.
+        // For now we're just using the primary monitor by default, but monitor(s) should be configurable by user by monitor.
+        let monitors = Monitor::all()?;
+
+        let monitor = monitors
+            .into_iter()
+            .find(|m| m.is_primary().unwrap_or(false))
+            .expect("No primary monitor found");
+
+        Ok(Self { monitor })
+    }
+
+    pub fn capture_screenshot(&self) -> XCapResult<RgbaImage> {
+        let image = self.monitor.capture_image()?;
+        Ok(image)
+    }
+}
+
 /// rectangular zone on screen to sample color from
 #[derive(Deserialize)]
 pub struct ZoneConfig {
-    //Add multiple monitor support here in future versions. Configure zone in yaml. For now we're just using the primary monitor by default, but zones should be configurable by user by monitor.
     x: u32,
     y: u32,
     width: u32,
@@ -43,21 +71,12 @@ impl ZoneColor {
 
 ///Used to sample a region on a monitor
 pub struct ZoneSampler {
-    config: ZoneConfig,
-    monitor: Monitor,
+    config: ZoneConfig
 }
 
 impl ZoneSampler {
     pub fn new (config: ZoneConfig) -> Result<Self> {
-        // this simple version automatically grabs the primary display. Future updates will allow configuration of monitor in the .yaml file, and this constructor will be a simple pass through of fields from ZoneConfig. Lifted some of this code from screenshots crate example.
-        let monitors = Monitor::all()?;
-
-        let monitor = monitors
-            .into_iter()
-            .find(|m| m.is_primary().unwrap_or(false))
-            .expect("No primary monitor found");
-
-        Ok(ZoneSampler {config, monitor})
+        Ok(ZoneSampler {config})
     }
 
     pub fn get_light_name(&self) -> String {
@@ -65,30 +84,22 @@ impl ZoneSampler {
     }
 
     /// Captures average rgb values for a zone. Uses downsampling for larger zones.
-    pub fn sample (&self, downsample: u8) -> Result<ZoneColor> {
+    pub fn sample (&self, screenshot: &RgbaImage, downsample: u8) -> Result<ZoneColor> {
 
-        //let time1 = Instant::now();
+        let time1 = Instant::now();
 
-        // Takes 20-25ms! There's really no way around this without getting more sophisticated as we're just using a screenshot.
-        // TODO: Make a separate capture function that captures the whole screen and passes the full image into ZoneSamplers.
-        // If we have 2-3 Zones this can hurt performance a lot!
-        let mut full_image = self.monitor.capture_image()?;
-        //println!("Capture time: {}ms", time1.elapsed().as_millis());
-
-
-        let time2 = Instant::now();
-        let snippet = image::imageops::crop(
-            &mut full_image,
+        let snippet = image::imageops::crop_imm(
+            screenshot,
             self.config.x,
             self.config.y,
             self.config.width,
             self.config.height,
         ).to_image();
 
-        //println!("Crop time: {}ms", time2.elapsed().as_nanos());
+        //println!("Crop time: {}ms", time1.elapsed().as_millis());
 
 
-        //let time3 = Instant::now();
+        //let time2 = Instant::now();
 
 
         // Downsample image unless its smaller than 100x100.
@@ -104,9 +115,9 @@ impl ZoneSampler {
         } else {
             snippet
         };
-        //println!("Resize time: {}micro sec", time3.elapsed().as_micros());
+        //println!("Resize time: {}micro sec", time2.elapsed().as_micros());
 
-        //let time4 = Instant::now();
+        //let time3 = Instant::now();
 
         // Calculate average
         // This is calculation isn't ideal. Don't need to average every single pixel.
@@ -124,7 +135,7 @@ impl ZoneSampler {
             count += 1;
         }
 
-        //println!("Averaging time: {} nano secs", time4.elapsed().as_nanos());
+        //println!("Averaging time: {} nano secs", time3.elapsed().as_nanos());
         //println!("Total image capture and process time: {}ms", time1.elapsed().as_millis());
 
         Ok(ZoneColor {

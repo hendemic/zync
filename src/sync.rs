@@ -3,7 +3,7 @@ use std::thread;
 use serde::Deserialize;
 use anyhow::{Result};
 
-use crate::capture::{ZoneSampler, ZoneColor};
+use crate::capture::{ScreenCapture, ZoneColor, ZoneSampler};
 use crate::lights::{MessageColor, LightController};
 
 const FRAME_RECOVERY_RATE: f32 = 0.5;
@@ -110,6 +110,7 @@ impl AdaptiveRate {
 }
 
 pub struct SyncEngine<'a> {
+    screen: ScreenCapture,
     zones: Vec<ZonePair<'a>>,
     rate: AdaptiveRate,
     config: PerformanceConfig,
@@ -117,17 +118,19 @@ pub struct SyncEngine<'a> {
 }
 
 impl<'a> SyncEngine<'a> {
-    pub fn new(zones: Vec<ZonePair<'a>>, rate: AdaptiveRate, config: PerformanceConfig, downsample: u8) -> Self {
-        SyncEngine {zones, rate, config, downsample}
+    pub fn new(screen: ScreenCapture, zones: Vec<ZonePair<'a>>, rate: AdaptiveRate, config: PerformanceConfig, downsample: u8) -> Self {
+        SyncEngine {screen, zones, rate, config, downsample}
     }
 
     pub fn run(&mut self) -> Result<()>{
         loop {
             let now = Instant::now();
+            let screenshot = self.screen.capture_screenshot()?;
+
             for area in &mut self.zones {
 
                 // grab screen
-                let sample = area.zone.sample(self.downsample)?;
+                let sample = area.zone.sample(&screenshot, self.downsample)?;
 
                 //check if we have a don't previous sample or if its meaningfully different to determine if we update the lights
                 let update = match &area.previous_sample {
@@ -154,6 +157,7 @@ impl<'a> SyncEngine<'a> {
                 area.previous_sample = Some(sample);
             }
             let elapsed_time = now.elapsed().as_millis() as u64;
+            //println!("Total work time: {} ms", elapsed_time);
             thread::sleep(Duration::from_millis(self.rate.adjust_timing(elapsed_time)));
         }
     }
