@@ -6,6 +6,11 @@ use anyhow::{Result};
 use crate::capture::{ZoneSampler, ZoneColor};
 use crate::lights::{MessageColor, LightController};
 
+const FRAME_RECOVERY_RATE: f32 = 0.5;
+const FRAME_RECOVERY_BUFFER: u16 = 2;
+const FRAME_THROTTLE_RATE: u64 = 20;
+const TRANSITION_SOFTNESS: f32 = 3.0;
+
 #[derive(Deserialize)]
 pub struct PerformanceConfig {
     pub target_fps: u64,
@@ -67,8 +72,8 @@ impl AdaptiveRate {
         }
 
         //otherwise, decreate current_interval by 20% of the delta
-        else if self.consecutive_successes > 3 {
-            self.current_interval = self.current_interval - (0.30 * delta as f32) as u64;
+        else if self.consecutive_successes > FRAME_RECOVERY_BUFFER {
+            self.current_interval = self.current_interval - (FRAME_RECOVERY_RATE * delta as f32) as u64;
         }
 
         self.consecutive_successes += 1;
@@ -80,7 +85,7 @@ impl AdaptiveRate {
 
         if self.current_interval < self.max_interval {
             self.current_interval = match self.consecutive_failures {
-                f if f < 10 => self.current_interval + 20,
+                f if f < 10 => self.current_interval + FRAME_THROTTLE_RATE,
                 _ => self.max_interval,
             };
         }
@@ -136,13 +141,13 @@ impl<'a> SyncEngine<'a> {
 
                 // send light command and handle rate adaption
                 let color = MessageColor::from(sample);
-                let transition: f32 = self.rate.current_interval as f32 / 1000.0 * 2.0;
+                let transition: f32 = self.rate.current_interval as f32 / 1000.0 * TRANSITION_SOFTNESS;
 
 
                 match area.zone_light.set_light(color, Some(transition)){
                     Ok(_) => self.rate.restore_framerate(),
                     Err(e) => {
-                        eprintln!("Message delivery failed: {}", e);
+                        println!("Message delivery failed: {}", e);
                         self.rate.throttle_framerate();
                     }
                 }

@@ -102,7 +102,7 @@ impl MQTTConfig {
             mqttoptions.set_credentials(user, password);
         }
 
-        let (client, connection) = Client::new(mqttoptions, 3); //use tiny cap for adaptive frame rate
+        let (client, connection) = Client::new(mqttoptions, 5); //use tiny cap for adaptive frame rate
         Ok((client, connection))
     }
 }
