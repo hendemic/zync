@@ -75,7 +75,6 @@ impl<'a> LightController<'a> {
         let light = self.get_topic();
         let payload = self.format_payload(color, t);
 
-        println!("Topic: {t}", t = &light);
         self.client.try_publish(&light, QoS::AtLeastOnce, false, payload)
             .with_context(|| format!("Failed to publish to topic {}", light))?;
         Ok(())

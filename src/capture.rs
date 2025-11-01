@@ -96,7 +96,7 @@ impl ZoneSampler {
             self.config.height,
         ).to_image();
 
-        //println!("Crop time: {}ms", time1.elapsed().as_millis());
+        // println!("Crop time: {}ms", time1.elapsed().as_millis());
 
 
         //let time2 = Instant::now();
@@ -105,19 +105,19 @@ impl ZoneSampler {
         // Downsample image unless its smaller than 100x100.
         // 90-600 micro seconds depending on downsample factor
         // TODO: Apply downsampling in averaging calculation by skipping pixels. Should save time.
-        let snippet = if (snippet.width() * snippet.height()) > 10000 {
-            image::imageops::resize(
-                &snippet,
-                snippet.width() / (downsample as u32),
-                snippet.height() / (downsample as u32),
-                FilterType::Nearest,
-            )
-        } else {
-            snippet
-        };
+        // let snippet = if (snippet.width() * snippet.height()) > 10000 {
+        //     image::imageops::resize(
+        //         &snippet,
+        //         snippet.width() / (downsample as u32),
+        //         snippet.height() / (downsample as u32),
+        //         FilterType::Nearest,
+        //     )
+        // } else {
+        //     snippet
+        // };
         //println!("Resize time: {}micro sec", time2.elapsed().as_micros());
 
-        //let time3 = Instant::now();
+        // let time3 = Instant::now();
 
         // Calculate average
         // This is calculation isn't ideal. Don't need to average every single pixel.
@@ -128,15 +128,15 @@ impl ZoneSampler {
         let mut b_sum = 0u64;
         let mut count = 0u64;
 
-        for pixel in snippet.pixels() {
+        for pixel in snippet.pixels().step_by(25) {
             r_sum += pixel[0] as u64;
             g_sum += pixel[1] as u64;
             b_sum += pixel[2] as u64;
             count += 1;
         }
 
-        //println!("Averaging time: {} nano secs", time3.elapsed().as_nanos());
-        //println!("Total image capture and process time: {}ms", time1.elapsed().as_millis());
+        // println!("Averaging time: {} micro secs", time3.elapsed().as_micros());
+        // println!("Total image process time: {}ms", time1.elapsed().as_millis());
 
         Ok(ZoneColor {
             r: (r_sum / count) as u8,

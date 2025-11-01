@@ -28,12 +28,11 @@ fn main() -> Result<()> {
     // start notification thread
     thread::spawn(move || {
         for notification in connection.iter().enumerate() {
-            println!("Notification = {:?}", notification);
+            // println!("Notification = {:?}", notification);
         }
     });
 
     engine.run()?;
-
     Ok(())
 }
 

@@ -102,7 +102,7 @@ impl AdaptiveRate {
         if adjust > 0 {
             (self.current_interval - work_time) as u64
         } else {
-            println!("Caution: High latency. Adjust zone, lights, downsample, and/or FPS.");
+            println!("Caution: High latency. Adjust zone, lights, downsample, and/or FPS. Work latency: {}", work_time);
             0
         }
     }
