@@ -112,7 +112,7 @@ impl ZoneSampler {
 
         }
 
-        println!("Total image process time: {}micro sec", time1.elapsed().as_micros());
+        // println!("Total image process time: {}micro sec", time1.elapsed().as_micros());
 
         Ok(ZoneColor {
             r: (r_sum / count) as u8,
