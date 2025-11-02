@@ -50,7 +50,7 @@ impl AppConfig {
 
     fn example_config() -> &'static str {
         r###"
-# Sample configuration file for two lights and single zone covering full 1080p monitor
+# Sample configuration file for one light and single zone covering full 1080p monitor
 # Enter mqtt options, define lights, and set zones that map to those lights in this file.
 mqtt:
   name: "my-connection"
@@ -59,12 +59,12 @@ mqtt:
   user: "user name"         # optional depending on broker config
   password: "password"      # optional depending on broker config
 
-downsample_factor: 10
+downsample_factor: 20
 
 lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
     service: "Zigbee2MQTT"
-    brightness: 200
+    brightness: 200                   # Not yet used
 
 zone:
   - name: "main_screen"
