@@ -146,7 +146,6 @@ impl<'a> SyncEngine<'a> {
                 let color = MessageColor::from(sample);
                 let transition: f32 = self.rate.current_interval as f32 / 1000.0 * TRANSITION_SOFTNESS;
 
-
                 match area.zone_light.set_light(color, Some(transition)){
                     Ok(_) => self.rate.restore_framerate(),
                     Err(e) => {
@@ -157,7 +156,6 @@ impl<'a> SyncEngine<'a> {
                 area.previous_sample = Some(sample);
             }
             let elapsed_time = now.elapsed().as_millis() as u64;
-            //println!("Total work time: {} ms", elapsed_time);
             thread::sleep(Duration::from_millis(self.rate.adjust_timing(elapsed_time)));
         }
     }
