@@ -42,9 +42,6 @@ performance:
   refresh_threshold: 10
 ```
 
-## Known issues
-Horrible performance on Wayland, and on Gnome, screen capture is unusable. Strongly advised to only use this on X11.
-
 ## Future plans
 - Windows compatibilty
 - Test adaptive framerate. I have a hunch its not actually working.
