@@ -43,7 +43,7 @@ performance:
 ```
 
 ## Known issues
-Dont use more than 2 zones -- currently an issue with screen capture. More than 3 or more could cause a lot of latency and may require you to adjust target fps.
+Horrible performance on Wayland, and on Gnome, screen capture is unusable. Strongly advised to only use this on X11.
 
 ## Future plans
 - Optimization of sampling and averaging
