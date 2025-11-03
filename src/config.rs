@@ -14,7 +14,6 @@ use crate::sync::PerformanceConfig;
 
 // App config loads all of the configuratoin parameters for the app, including mqtt configs, the lights, zones, and global settings for the app.
 // These are passed into the other objects with config.field_name syntax.
-// The thinking here is I wanted the structs to be defined in their module, but I wanted the app config to all be centralized.
 #[derive(Deserialize)]
 pub struct AppConfig {
     pub mqtt: MQTTConfig,
