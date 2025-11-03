@@ -16,11 +16,15 @@ To use, build with cargo. Create config.yaml at ~/.config/zync/config.yaml, or r
 - Adaptive framerate. Config sets target for percent of thread time used for screen capture (e.g. 10fps = 100ms thread time. 0.25 means 25ms capture time will throttle framerate). This gives the user some control over CPU thread usage and handles spikes in performance by throttling.
 
 ## Roadmap
+### Planned
 - Wayland support via Pipewire. This may take awhile, but working on Linux Wayland is a key goal.
 - Exploring Windows + MacOS support, and capture card feed for Raspi + HDMI capture card feed for TV support.
 - User controls over aesthetics through abstractions or direct variables (e.g. "intensity: high" uses a preconfigured transition settings. The user could override them in the config).
+
+### Other ideas in consideration
 - CLI commands to start and stop, initialize a config, change settings
-- HomeAssistant trigger for sync. Use a toggle (or any automation) to start and exit the sync loop.
+- HomeAssistant trigger for sync. Use a toggle (or any automation) to start and exit the sync loop
+- Hue Gradient and other "segment" lights. Requires generics for "ZonePairs" and reworking Zone to Light mapping structure for a many-to-one relationship of Zones to a light's segments.
 
 #### Sample yaml file
 ```yaml
