@@ -9,6 +9,18 @@ Tested with KDE Plasma X11 and Z2M hosted in an LXC with an SLZB-06 coodinator.
 ## Usage
 To use, build with cargo. Create config.yaml at ~/.config/zync/config.yaml, or run the first time without a config and it should create a sample config file for you and panic. Edit it with your MQTT and light settings and start the program again.
 
+## Current features
+- Connects to MQTT broker and sends messages to Z2M to control lights
+- Support for X11 Linux
+- Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps.
+- Adaptive framerate. Config sets target for percent of thread time used for screen capture (e.g. 10fps = 100ms thread time. 0.25 means 25ms capture time will throttle framerate). This gives the user some control over CPU thread usage and handles spikes in performance by throttling.
+
+## Roadmap
+- Wayland support via Pipewire. This may take awhile, but working on Linux Wayland is a key goal.
+- Exploring Windows + MacOS support, and capture card feed for Raspi + HDMI capture card feed for TV support.
+- User controls over aesthetics through abstractions or direct variables (e.g. "intensity: high" uses a preconfigured transition settings. The user could override them in the config).
+- CLI commands to start and stop, initialize a config, change settings
+- HomeAssistant trigger for sync. Use a toggle (or any automation) to start and exit the sync loop.
 
 #### Sample yaml file
 ```yaml
@@ -41,8 +53,3 @@ performance:
   max_delay: 2000                  #max recovery delay in ms before retrying connection
   refresh_threshold: 10
 ```
-
-## Future plans
-- Windows compatibilty
-- Test adaptive framerate. I have a hunch its not actually working.
-- Wayland is probably off the table for a while until the xcap crate can support it or I understand pipewire well enough to use other approaches!
