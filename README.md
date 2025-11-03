@@ -37,7 +37,7 @@ zone:
     light_name: "your_device_name"  # Must match device_name of the lights imported above.
 
 performance:
-  target_fps: 10
+  max_fps: 10
   max_delay: 2000                  #max recovery delay in ms before retrying connection
   refresh_threshold: 10
 ```

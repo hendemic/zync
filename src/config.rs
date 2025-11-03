@@ -64,7 +64,7 @@ downsample_factor: 20
 lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
     service: "Zigbee2MQTT"
-    brightness: 200                   # Not yet used
+    brightness: 0.8                   # percent brightness of light. range is 0-1. anything over 1 will be capped to 1 by the app.
 
 zone:
   - name: "main_screen"
@@ -75,9 +75,11 @@ zone:
     light_name: "your_device_name"  # Must match device_name of the lights imported above
 
 performance:
-  target_fps: 10
-  max_delay: 2000                  #max recovery delay in ms before retrying connection
-  refresh_threshold: 10
+  max_fps: 12                       # max_fps. make sure it isn't too high for your lights. 10-12 is a safe starting point.
+  max_delay: 500                    # max recovery delay in ms before retrying connection
+  refresh_threshold: 10             # difference in color required to send MQTT light change
+  percent_thread_work: 0.25         # max work/interval ratio.
+  fps_reporting: 10                 # time in seconds between fps print in terminal. raise percent_thread_work for higher FPS.
 "###
     }
 }

@@ -71,12 +71,12 @@
 ### sync.rs
 - mod sync
   - struct PerformanceConfig
-    - target_fps, min_fps, refresh_threshold
+    - max_fps, min_fps, refresh_threshold
   - struct ZoneMap
     - name, ScreenZone, lights (Vec<LightController>)
   - struct AdaptiveRate
     - target_interval, current_interval, consecutive_successes/failures
-    - fn new (takes target_fps, min_fps)
+    - fn new (takes max_fps, min_fps)
     - fn on_success
     - fn on_failure
     - fn get_interval
@@ -85,7 +85,7 @@
     - zone: ScreenZone
     - rate: AdaptiveRate
     - config: PerformanceConfig
-    - transition: f32 (calculated from config.target_fps)
+    - transition: f32 (calculated from config.max_fps)
     - fn new (takes Vec<LightController>, ScreenZone, PerformanceConfig)
     - fn run (main sync loop - runs in main thread)
       - Loop: sample screen → publish to lights → handle success/failure → sleep

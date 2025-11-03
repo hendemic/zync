@@ -54,19 +54,19 @@ impl ZoneColor {
     pub fn new (r: u8, g: u8, b: u8) -> Self {
         ZoneColor{ r, g, b }
     }
+    pub fn compare_sample(&self, other: &ZoneColor) -> f32 {
+        let dr = (self.r as f32 - other.r as f32).abs();
+        let dg = (self.g as f32 - other.g as f32).abs();
+        let db = (self.b as f32 - other.b as f32).abs();
 
+        (dr.powi(2) + dg.powi(2) + db.powi(2)).sqrt()
+    }
     ///this function checks if any color channel exceeds a given threshold
     pub fn differs_from (&self, other: &ZoneColor, threshold: u8) -> bool {
-        let diffs = (
-            self.r.abs_diff(other.r),
-            self.g.abs_diff(other.g),
-            self.b.abs_diff(other.b)
-        );
-
-        let max_diff = diffs.0.max(diffs.1).max(diffs.2);
-
-        max_diff > threshold
+        let diff = self.compare_sample(other);
+        diff > threshold as f32
     }
+
 }
 
 ///Used to sample a region on a monitor

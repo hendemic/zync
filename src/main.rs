@@ -18,8 +18,9 @@ fn main() -> Result<()> {
     let config = AppConfig::load()?;
     let (client, mut connection) = config.mqtt.create_client()?;
     let adaptive_rate = AdaptiveRate::new_from_fps(
-                            config.performance.target_fps,
-                            config.performance.max_delay
+                            config.performance.max_fps,
+                            config.performance.max_delay,
+                            config.performance.percent_thread_work,
     );
     let zone_map = extract_zones_and_lights(config.lights, config.zones, &client)?;
     let screen = ScreenCapture::new()?;
@@ -27,7 +28,7 @@ fn main() -> Result<()> {
 
     // start notification thread
     thread::spawn(move || {
-        for notification in connection.iter().enumerate() {
+        for _notification in connection.iter().enumerate() {
             // println!("Notification = {:?}", notification);
         }
     });
