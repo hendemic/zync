@@ -1,1 +1,8 @@
 /target
+
+config.yaml
+*.yaml
+!config.example.yaml
+
+.DS_Store
+Thumbs.db

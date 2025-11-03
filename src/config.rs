@@ -79,7 +79,7 @@ performance:
   max_delay: 500                    # max recovery delay in ms before retrying connection
   refresh_threshold: 10             # difference in color required to send MQTT light change
   percent_thread_work: 0.25         # max work/interval ratio.
-  fps_reporting: 10                 # time in seconds between fps print in terminal. raise percent_thread_work for higher FPS.
+  fps_reporting: 10                 # time in seconds between fps averages output in terminal. raise percent_thread_work for higher FPS.
 "###
     }
 }

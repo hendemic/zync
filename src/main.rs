@@ -15,6 +15,7 @@ mod sync;
 
 fn main() -> Result<()> {
 
+    // Load configuratoin and initialize all objects to pass into sync engine
     let config = AppConfig::load()?;
     let (client, mut connection) = config.mqtt.create_client()?;
     let adaptive_rate = AdaptiveRate::new_from_fps(
@@ -24,6 +25,8 @@ fn main() -> Result<()> {
     );
     let zone_map = extract_zones_and_lights(config.lights, config.zones, &client)?;
     let screen = ScreenCapture::new()?;
+
+    // create SyncEngine -- this is the main loop that runs the program
     let mut engine = SyncEngine::new(screen, zone_map, adaptive_rate, config.performance, config.downsample_factor);
 
     // start notification thread
@@ -33,6 +36,7 @@ fn main() -> Result<()> {
         }
     });
 
+    // start main thread
     engine.run()?;
     Ok(())
 }

@@ -175,6 +175,20 @@ impl<'a> SyncEngine<'a> {
 
     }
 
+    pub fn send_fps_message(&mut self) -> () {
+        self.interval_samples.push(self.rate.current_interval);
+
+        if self.last_report_time.elapsed().as_secs() >= self.config.fps_reporting {
+            let avg = (self.interval_samples.iter().sum::<u64>() / self.interval_samples.len() as u64) as f32;
+            println!("{}\tAvg fps: {:>5.2}",
+                Local::now().format("%H:%M:%S"),
+                1000 as f32 / avg,
+            );
+            self.interval_samples.clear();
+            self.last_report_time = Instant::now();
+        }
+    }
+
     pub fn run(&mut self) -> Result<()>{
         self.last_report_time = Instant::now();
 
@@ -209,17 +223,8 @@ impl<'a> SyncEngine<'a> {
                 area.previous_sample = Some(sample);
             }
 
-            self.interval_samples.push(self.rate.current_interval);
+            self.send_fps_message();
 
-            if self.last_report_time.elapsed().as_secs() >= self.config.fps_reporting {
-                let avg = (self.interval_samples.iter().sum::<u64>() / self.interval_samples.len() as u64) as f32;
-                println!("{}\tAvg fps: {:>5.2}",
-                    Local::now().format("%H:%M:%S"),
-                    1000 as f32 / avg,
-                );
-                self.interval_samples.clear();
-                self.last_report_time = Instant::now();
-            }
             let elapsed_time = now.elapsed().as_millis() as u64;
             thread::sleep(Duration::from_millis(self.rate.adjust_timing(elapsed_time)));
         }
