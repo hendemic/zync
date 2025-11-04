@@ -1,38 +1,71 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-use image::imageops::*;
-use image::DynamicImage;
-use image::ImageBuffer;
-use image::Rgba;
 use image::RgbaImage;
 use serde::Deserialize;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use xcap::*;
-use std::time::{Duration, Instant};
+//use std::time::{Duration, Instant};
 
 
-/// Handles screen capture. Currently just supports stills. Will be the struct that contains future vid feed on Windows and Wayland
-pub struct ScreenCapture {
-    monitor: Monitor,
+/// Captures screen across platforms
+pub trait ScreenCapture {
+    fn new(monitor: Monitor) -> Result<Box<dyn ScreenCapture>> where Self: Sized;
+    fn capture_frame(&self) -> Result<RgbaImage>;
+
 }
 
-impl ScreenCapture {
-    pub fn new() -> Result<Self> {
-        // Add multiple monitor support here in future versions. Configure zone in yaml.
-        // For now we're just using the primary monitor by default, but monitor(s) should be configurable by user by monitor.
-        let monitors = Monitor::all()?;
+//Structs for X11, Wayland, and in the future MacOS and Windows.
+pub struct X11Capturer { monitor: Monitor }
+pub struct WaylandCapturer {monitor: Monitor } //add pipewire settings
 
-        let monitor = monitors
-            .into_iter()
-            .find(|m| m.is_primary().unwrap_or(false))
-            .expect("No primary monitor found");
 
-        Ok(Self { monitor })
+impl ScreenCapture for X11Capturer {
+    fn new(monitor: Monitor) -> Result<Box<dyn ScreenCapture>> {
+        Ok(Box::new(X11Capturer {monitor}))
     }
 
-    pub fn capture_screenshot(&self) -> XCapResult<RgbaImage> {
+    fn capture_frame(&self) -> Result<RgbaImage> {
         let image = self.monitor.capture_image()?;
         Ok(image)
     }
+}
+
+impl ScreenCapture for WaylandCapturer {
+    fn new(monitor: Monitor) -> Result<Box<dyn ScreenCapture>> {
+        Ok(Box::new(WaylandCapturer {monitor}))
+
+        // for wayland, new() will use internal functions to create pipewire connection,
+        // and start stream in thread
+    }
+
+    ///placeholder for now - will take latest frame from buffer
+    fn capture_frame(&self) -> Result<RgbaImage> {
+        let image = self.monitor.capture_image()?;
+        Ok(image)
+    }
+}
+
+/// Constructor for new ScreenCapture based on platform
+pub fn new_screen() -> Result<Box<dyn ScreenCapture>> {
+    let monitors = Monitor::all()?;
+
+    let monitor = monitors
+        .into_iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .expect("No primary monitor found");
+
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {  //TODO need to check if there are other checks to make sure I accurately detect wayland
+            bail!("Wayland support not yet available");
+        }
+        else {
+            X11Capturer::new(monitor)
+        }
+    }
+    #[cfg(target_os = "windows")]
+    bail!("Windows not yet supported");
+
+    #[cfg(target_os = "macos")]
+    bail!("MacOS not yet supported");
 }
 
 /// rectangular zone on screen to sample color from
@@ -86,7 +119,7 @@ impl ZoneSampler {
     /// Captures average rgb values for a zone. Uses downsampling for larger zones.
     pub fn sample (&self, screenshot: &RgbaImage, downsample: u8) -> Result<ZoneColor> {
 
-        let time1 = Instant::now();
+        //let time1 = Instant::now();
 
         //set loop start + stop for iterating through pixels
         let x_start = self.config.x;

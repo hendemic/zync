@@ -145,7 +145,7 @@ impl AdaptiveRate {
 }
 
 pub struct SyncEngine<'a> {
-    screen: ScreenCapture,
+    screen: Box<dyn ScreenCapture>,
     zones: Vec<ZonePair<'a>>,
     rate: AdaptiveRate,
     config: PerformanceConfig,
@@ -155,7 +155,7 @@ pub struct SyncEngine<'a> {
 }
 
 impl<'a> SyncEngine<'a> {
-    pub fn new(screen: ScreenCapture, zones: Vec<ZonePair<'a>>, rate: AdaptiveRate, config: PerformanceConfig, downsample: u8) -> Self {
+    pub fn new(screen: Box<dyn ScreenCapture>, zones: Vec<ZonePair<'a>>, rate: AdaptiveRate, config: PerformanceConfig, downsample: u8) -> Self {
         SyncEngine {
             screen,
             zones,
@@ -194,12 +194,12 @@ impl<'a> SyncEngine<'a> {
 
         loop {
             let now = Instant::now();
-            let screenshot = self.screen.capture_screenshot()?;
+            let frame = self.screen.capture_frame()?;
 
             for area in &mut self.zones {
 
                 // grab screen
-                let sample = area.zone.sample(&screenshot, self.downsample)?;
+                let sample = area.zone.sample(&frame, self.downsample)?;
 
                 //check if we have a don't previous sample or if its meaningfully different to determine if we update the lights
                 let update = match &area.previous_sample {

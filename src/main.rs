@@ -3,7 +3,7 @@ use anyhow::Result;
 use rumqttc::Client;
 use std::collections::HashMap;
 
-use crate::capture::{ZoneConfig, ZoneSampler, ScreenCapture};
+use crate::capture::{ZoneConfig, ZoneSampler, new_screen};
 use crate::config::AppConfig;
 use crate::lights::*;
 use crate::sync::{AdaptiveRate, SyncEngine, ZonePair};
@@ -24,7 +24,7 @@ fn main() -> Result<()> {
                             config.performance.percent_thread_work,
     );
     let zone_map = extract_zones_and_lights(config.lights, config.zones, &client)?;
-    let screen = ScreenCapture::new()?;
+    let screen = new_screen()?;
 
     // create SyncEngine -- this is the main loop that runs the program
     let mut engine = SyncEngine::new(screen, zone_map, adaptive_rate, config.performance, config.downsample_factor);

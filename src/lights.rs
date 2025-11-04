@@ -13,7 +13,7 @@ const MIN_BRIGHTNESS: u8 = 1;
 const BRIGHTNESS_EXP: f32 = 1.3;
 const BRIGHTNESS_FACTOR: f32 = 1.1;
 
-//this is used to format the payload for various services. HueAPI isn't zigbee but including it as I have plans to make it in scope as the application adds different connection types beyond MQTT
+//this is used to format the payload for various services. HueAPI isn't zigbee but including it as I am interested in making it in scope as the application adds different connection types beyond MQTT
 #[derive(Deserialize, Debug, Clone)]
 pub enum LightService {
     Zigbee2MQTT,
