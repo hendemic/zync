@@ -1,4 +1,5 @@
 /target
+/dev-notes
 
 config.yaml
 *.yaml
