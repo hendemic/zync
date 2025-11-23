@@ -10,7 +10,7 @@ use crate::lights::{MessageColor, LightController};
 const FRAME_RECOVERY_RATE: f32 = 0.2;
 const FRAME_RECOVERY_BUFFER: u16 = 5;
 const FRAME_THROTTLE_RATE: u64 = 10;
-const TRANSITION_SOFTNESS: f32 = 0.4;
+const TRANSITION_SOFTNESS: f32 = 0.3;
 const TRANSITION_MIN: f32 = 0.02;
 const TRANSITION_MAX: f32 = 1.0;
 

@@ -52,8 +52,20 @@ impl ScreenCapture for X11Capturer {
 impl ScreenCapture for WaylandCapturer {
     fn new() -> Result<Box<dyn ScreenCapture>> {
         let runtime = Runtime::new()?;
+        // This blocks until user selects a display
         let pipewire_id: u32 = runtime.block_on(Self::get_pipewire_id())?;
+
         let frame_buffer = Self::start_stream(pipewire_id)?;
+
+        // Block until first frame arrives
+        loop {
+            let guard = frame_buffer.lock().unwrap();
+            if guard.is_some() {
+                break;
+            }
+            drop(guard);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
 
         Ok(Box::new(WaylandCapturer {
             pipewire_id,
@@ -62,18 +74,9 @@ impl ScreenCapture for WaylandCapturer {
     }
     fn capture_frame(&self) -> Result<RgbaImage> {
         let guard = self.frame_buffer.lock().unwrap();
-        match &*guard {
-            Some(img) => Ok(img.clone()),
-            None => {
-                // Pipeline still initializing - wait a bit and try again
-                drop(guard);
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-                let guard = self.frame_buffer.lock().unwrap();
-                guard.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("No frame available after waiting"))
-                    .map(|img| img.clone())
-            }
-        }
+        guard.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No frame available"))
+            .map(|img| img.clone())
     }
 
     // This is a placeholder. Process will run for the entiretly of the program's lifecycle
