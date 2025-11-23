@@ -2,23 +2,38 @@ use image::RgbaImage;
 use serde::Deserialize;
 use anyhow::{Result, bail};
 use xcap::*;
+use ashpd::desktop::screencast::{Screencast, CursorMode, SourceType};
+use ashpd::WindowIdentifier;
+use ashpd::desktop::PersistMode;
+use std::sync::{Arc, Mutex};
+use tokio::runtime::Runtime;
+
 //use std::time::{Duration, Instant};
 
 
 /// Captures screen across platforms
 pub trait ScreenCapture {
-    fn new(monitor: Monitor) -> Result<Box<dyn ScreenCapture>> where Self: Sized;
+    fn new() -> Result<Box<dyn ScreenCapture>> where Self: Sized;
     fn capture_frame(&self) -> Result<RgbaImage>;
+    fn stop(&mut self) -> Result<()>;
 
 }
 
 //Structs for X11, Wayland, and in the future MacOS and Windows.
 pub struct X11Capturer { monitor: Monitor }
-pub struct WaylandCapturer {monitor: Monitor } //add pipewire settings
-
+pub struct WaylandCapturer {
+    pipewire_id: u32,
+    frame_buffer: Arc<Mutex<Option<RgbaImage>>>,
+}
 
 impl ScreenCapture for X11Capturer {
-    fn new(monitor: Monitor) -> Result<Box<dyn ScreenCapture>> {
+    fn new() -> Result<Box<dyn ScreenCapture>> {
+        let monitors = Monitor::all()?;
+
+        let monitor = monitors
+            .into_iter()
+            .find(|m| m.is_primary().unwrap_or(false))
+            .expect("No primary monitor found");
         Ok(Box::new(X11Capturer {monitor}))
     }
 
@@ -26,39 +41,73 @@ impl ScreenCapture for X11Capturer {
         let image = self.monitor.capture_image()?;
         Ok(image)
     }
+    fn stop(&mut self) -> Result<()>{
+        println!("Nothing stopped - no stream to end on X11");
+        Ok(())
+    }
 }
 
 impl ScreenCapture for WaylandCapturer {
-    fn new(monitor: Monitor) -> Result<Box<dyn ScreenCapture>> {
-        Ok(Box::new(WaylandCapturer {monitor}))
+    fn new() -> Result<Box<dyn ScreenCapture>> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let pipewire_id: u32 = runtime.block_on(Self::get_pipewire_id())?;
+        let frame_buffer = Self::start_stream(pipewire_id)?;
 
-        // for wayland, new() will use internal functions to create pipewire connection,
-        // and start stream in thread
+        Ok(Box::new(WaylandCapturer {
+            pipewire_id,
+            frame_buffer,
+        }))
     }
-
     ///placeholder for now - will take latest frame from buffer
     fn capture_frame(&self) -> Result<RgbaImage> {
-        let image = self.monitor.capture_image()?;
-        Ok(image)
+        todo!("Implement capture_frame for WaylandCapturer")
+    }
+    fn stop(&mut self) -> Result<()>{
+        Ok(())
+    }
+}
+
+impl WaylandCapturer {
+    async fn get_pipewire_id() -> ashpd::Result<u32> {
+        let proxy = Screencast::new().await?;
+        let session = proxy.create_session().await?;
+
+        //prompt user to select monitor
+        proxy.select_sources(
+            &session,
+            CursorMode::Metadata,
+            SourceType::Monitor.into(),
+            false,
+            None,
+            PersistMode::DoNot,
+        ).await?;
+
+        //get stream and returns pipewire node id or error
+        proxy.start(&session, None)
+            .await?
+            .response()?
+            .streams()
+            .first()
+            .map(|stream| stream.pipe_wire_node_id())
+            .ok_or(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled))
+    }
+
+    fn start_stream(pipewire_id: u32) -> Result<Arc<Mutex<Option<RgbaImage>>>> {
+        todo!("Implement start_stream")
     }
 }
 
 /// Constructor for new ScreenCapture based on platform
 pub fn new_screen() -> Result<Box<dyn ScreenCapture>> {
-    let monitors = Monitor::all()?;
 
-    let monitor = monitors
-        .into_iter()
-        .find(|m| m.is_primary().unwrap_or(false))
-        .expect("No primary monitor found");
 
     #[cfg(target_os = "linux")]
     {
         if std::env::var("WAYLAND_DISPLAY").is_ok() {  //TODO need to check if there are other checks to make sure I accurately detect wayland
-            bail!("Wayland support not yet available");
+            WaylandCapturer::new()
         }
         else {
-            X11Capturer::new(monitor)
+            X11Capturer::new()
         }
     }
     #[cfg(target_os = "windows")]
