@@ -8,6 +8,8 @@ Tested with:
 - KDE Plasma (X11 + Wayland), Gnome Wayland
 - Z2M hosted in an LXC with an SLZB-06 coodinator.
 
+Note: In some fullscreen games on Gnome Wayland, you'll need to boot the game and then start this app and actually select the specific window. Still figuring out what can be done to make this work better, but fullscreen games sometimes bypass the pipewire stream in Gnome.
+
 ## Usage
 To use, build with cargo. Create config.yaml at ~/.config/zync/config.yaml, or run the first time without a config and it should create a sample config file for you and panic. Edit it with your MQTT and light settings and start the program again.
 
