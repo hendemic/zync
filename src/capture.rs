@@ -111,7 +111,8 @@ impl WaylandCapturer {
             .map(|stream| stream.pipe_wire_node_id())
             .ok_or(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled))
     }
-
+    /// in full transparency this was written with a lot of help from Gemini 3 Pro and Claude Sonnet 4.5.
+    /// It should be reviewed and improved at a later date.
     fn start_stream(pipewire_id: u32) -> Result<Arc<Mutex<Option<RgbaImage>>>> {
         let frame_buffer = Arc::new(Mutex::new(None));
         let buffer_handle = frame_buffer.clone();
