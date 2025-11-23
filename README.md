@@ -2,9 +2,11 @@
 This is a work in progress. Pure rust + MQTT display and light sync utility.
 
 ## Compatibility
-Z2M lights + X11 Linux only for now. Testing with Windows soon. Wayland is a long ways out.
+Z2M lights on Linux (Wayland and X11)
 
-Tested with KDE Plasma X11 and Z2M hosted in an LXC with an SLZB-06 coodinator.
+Tested with:
+- KDE Plasma X11, Gnome Wayland
+- Z2M hosted in an LXC with an SLZB-06 coodinator.
 
 ## Usage
 To use, build with cargo. Create config.yaml at ~/.config/zync/config.yaml, or run the first time without a config and it should create a sample config file for you and panic. Edit it with your MQTT and light settings and start the program again.
@@ -45,13 +47,13 @@ performance:
 
 ## Current features
 - Connects to MQTT broker and sends messages to Z2M to control lights
-- Support for X11 Linux
+- Support for X11 Linux and Wayland
 - Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps.
 - Adaptive framerate. Config sets target for percent of thread time used for screen capture (e.g. 10fps = 100ms thread time. 0.25 means 25ms capture time will throttle framerate). This gives the user some control over CPU thread usage and handles spikes in performance by throttling.
+  - This approach only works on X11. Wayland with pipewire is extremely low latency and the pipewire stream is what uses the most CPU.
 
 ## Roadmap
 ### Planned
-- Wayland support via Pipewire. This may take awhile, but working on Linux Wayland is a key goal.
 - Exploring Windows + MacOS support, and capture card feed for Raspi + HDMI capture card feed for TV support.
 - User controls over aesthetics through abstractions or direct variables (e.g. "intensity: high" uses a preconfigured transition settings. The user could override them in the config).
 
