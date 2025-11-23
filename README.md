@@ -1,6 +1,11 @@
 ## Overview
 This is a work in progress. Pure rust + MQTT display and light sync utility.
 
+## Demo
+https://github.com/user-attachments/assets/d539e25f-bb2c-441a-ba42-3de5c68eac9f
+
+
+
 ## Compatibility
 Z2M lights on Linux (Wayland and X11)
 
