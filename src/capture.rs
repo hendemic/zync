@@ -96,10 +96,10 @@ impl WaylandCapturer {
         proxy.select_sources(
             &session,
             CursorMode::Metadata,
-            SourceType::Monitor.into(),
+            (SourceType::Monitor | SourceType::Window).into(),
             false,
             None,
-            PersistMode::DoNot,
+            PersistMode::ExplicitlyRevoked,
         ).await?;
 
         //get stream and returns pipewire node id or error
@@ -155,7 +155,7 @@ impl WaylandCapturer {
             // 2. Configure properties
             let caps = gst::Caps::builder("video/x-raw")
                 .field("format", "RGBA")
-                .field("framerate", gst::Fraction::new(30, 1))
+                //.field("framerate", gst::Fraction::new(60, 1))
                 .build();
             capsfilter.set_property("caps", &caps);
 
