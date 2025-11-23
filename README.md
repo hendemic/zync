@@ -5,7 +5,7 @@ This is a work in progress. Pure rust + MQTT display and light sync utility.
 Z2M lights on Linux (Wayland and X11)
 
 Tested with:
-- KDE Plasma X11, Gnome Wayland
+- KDE Plasma (X11 + Wayland), Gnome Wayland
 - Z2M hosted in an LXC with an SLZB-06 coodinator.
 
 ## Usage
