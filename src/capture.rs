@@ -1,12 +1,15 @@
 use image::RgbaImage;
 use serde::Deserialize;
-use anyhow::{Result, bail};
+use anyhow::{Result};
 use xcap::*;
 use ashpd::desktop::screencast::{Screencast, CursorMode, SourceType};
-use ashpd::WindowIdentifier;
 use ashpd::desktop::PersistMode;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use tokio::runtime::Runtime;
+use gstreamer as gst;
+use gst::prelude::*;
+use gstreamer_app::{AppSink, AppSinkCallbacks};
 
 //use std::time::{Duration, Instant};
 
@@ -15,8 +18,7 @@ use tokio::runtime::Runtime;
 pub trait ScreenCapture {
     fn new() -> Result<Box<dyn ScreenCapture>> where Self: Sized;
     fn capture_frame(&self) -> Result<RgbaImage>;
-    fn stop(&mut self) -> Result<()>;
-
+    fn stop(&mut self) -> Result<()>; //unused, but keeping in interface as a reminder that thread is created in new()
 }
 
 //Structs for X11, Wayland, and in the future MacOS and Windows.
@@ -49,7 +51,7 @@ impl ScreenCapture for X11Capturer {
 
 impl ScreenCapture for WaylandCapturer {
     fn new() -> Result<Box<dyn ScreenCapture>> {
-        let runtime = tokio::runtime::Runtime::new()?;
+        let runtime = Runtime::new()?;
         let pipewire_id: u32 = runtime.block_on(Self::get_pipewire_id())?;
         let frame_buffer = Self::start_stream(pipewire_id)?;
 
@@ -58,10 +60,25 @@ impl ScreenCapture for WaylandCapturer {
             frame_buffer,
         }))
     }
-    ///placeholder for now - will take latest frame from buffer
     fn capture_frame(&self) -> Result<RgbaImage> {
-        todo!("Implement capture_frame for WaylandCapturer")
+        let guard = self.frame_buffer.lock().unwrap();
+        match &*guard {
+            Some(img) => Ok(img.clone()),
+            None => {
+                // Pipeline still initializing - wait a bit and try again
+                drop(guard);
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                let guard = self.frame_buffer.lock().unwrap();
+                guard.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("No frame available after waiting"))
+                    .map(|img| img.clone())
+            }
+        }
     }
+
+    // This is a placeholder. Process will run for the entiretly of the program's lifecycle
+    // If I add any CLI or HomeAssistant trigger to start and stop syncing, I may need to revisit this
+    // Leaving this in the interface as a reminder this may be necessary, and that starting this bg thread from within the object on new() is a little messy.
     fn stop(&mut self) -> Result<()>{
         Ok(())
     }
@@ -93,8 +110,97 @@ impl WaylandCapturer {
     }
 
     fn start_stream(pipewire_id: u32) -> Result<Arc<Mutex<Option<RgbaImage>>>> {
-        todo!("Implement start_stream")
+        let frame_buffer = Arc::new(Mutex::new(None));
+        let buffer_handle = frame_buffer.clone();
+
+        thread::spawn(move || {
+            // Initialize GStreamer
+            if let Err(e) = gst::init() {
+                eprintln!("Failed to init GStreamer: {}", e);
+                return;
+            }
+
+            // 1. Create Pipeline and Elements
+            let pipeline = gst::Pipeline::new();
+            pipeline.set_property("name", "zync-capture");
+
+            let src = gst::ElementFactory::make("pipewiresrc")
+                .property("path", format!("{}", pipewire_id))
+                .build()
+                .unwrap();
+
+            let videoconvert = gst::ElementFactory::make("videoconvert")
+                .build()
+                .unwrap();
+
+            let videorate = gst::ElementFactory::make("videorate")
+                .build()
+                .unwrap();
+
+            let capsfilter = gst::ElementFactory::make("capsfilter")
+                .build()
+                .unwrap();
+
+            let appsink = gst::ElementFactory::make("appsink")
+                .name("sink")
+                .build()
+                .unwrap()
+                .downcast::<AppSink>()
+                .unwrap();
+
+            // 2. Configure properties
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("format", "RGBA")
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build();
+            capsfilter.set_property("caps", &caps);
+
+            // 3. Add and Link (note: appsink.upcast_ref() for the array)
+            pipeline.add_many(&[&src, &videoconvert, &videorate, &capsfilter, appsink.upcast_ref()])
+                .unwrap();
+            gst::Element::link_many(&[&src, &videoconvert, &videorate, &capsfilter, appsink.upcast_ref()])
+                .unwrap();
+
+            // 4. appsink is already the AppSink type, no need to downcast again
+            // Configure sink
+            appsink.set_max_buffers(1);
+            appsink.set_drop(true);
+
+
+            let sink_buffer_handle = buffer_handle.clone();
+
+            appsink.set_callbacks(
+                AppSinkCallbacks::builder()
+                    .new_sample(move |sink| {
+                        let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+
+                        let caps = sample.caps().ok_or(gst::FlowError::Error)?;
+                        let structure = caps.structure(0).ok_or(gst::FlowError::Error)?;
+                        let width = structure.get::<i32>("width").map_err(|_| gst::FlowError::Error)? as u32;
+                        let height = structure.get::<i32>("height").map_err(|_| gst::FlowError::Error)? as u32;
+
+                        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+
+                        if let Some(img) = RgbaImage::from_raw(width, height, map.as_slice().to_vec()) {
+                            let mut guard = sink_buffer_handle.lock().unwrap();
+                            *guard = Some(img);
+                        }
+
+                        Ok(gst::FlowSuccess::Ok)
+                    })
+                    .build(),
+            );
+
+            pipeline.set_state(gst::State::Playing).expect("Unable to set the pipeline to the `Playing` state");
+
+            let main_loop = gst::glib::MainLoop::new(None, false);
+            main_loop.run();
+        });
+
+        Ok(frame_buffer)
     }
+
 }
 
 /// Constructor for new ScreenCapture based on platform
@@ -194,7 +300,7 @@ impl ZoneSampler {
 
         }
 
-        // println!("Total image process time: {}micro sec", time1.elapsed().as_micros());
+        //println!("Total image process time: {}micro sec", time1.elapsed().as_micros());
 
         Ok(ZoneColor {
             r: (r_sum / count) as u8,
