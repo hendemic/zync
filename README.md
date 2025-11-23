@@ -1,5 +1,5 @@
 ## Overview
-This is a work in progress. Pure rust + MQTT display and light sync utility.
+Real-time ambilight clone for Linux + Zigbee2MQTT in Rust.
 
 ## Demo
 https://github.com/user-attachments/assets/d539e25f-bb2c-441a-ba42-3de5c68eac9f
