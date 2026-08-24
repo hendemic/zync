@@ -1,11 +1,13 @@
 use anyhow::{anyhow, bail, Context, Result};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
 use ashpd::desktop::PersistMode;
-use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app::{AppSink, AppSinkCallbacks};
+use gstreamer_video as gst_video;
+use gst_video::prelude::*;
 use image::RgbaImage;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -28,8 +30,42 @@ const CAPTURE_MAX_FPS: i32 = 15;
 /// Portal negotiation blocks on the user picking a monitor, so this is generous.
 const PORTAL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long to wait for the compositor to deliver a first frame once streaming.
-const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a capture mode gets to deliver its first frame before it is judged
+/// unsupported and the next mode is tried. GL context creation and PipeWire
+/// format renegotiation both happen inside this window.
+const MODE_NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Upper bound on startup across every capture mode attempt.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Which kind of buffer the compositor is asked to fill.
+///
+/// This is not a performance knob; it decides whether fullscreen windows are
+/// captured at all on GNOME. Mutter only records a directly-scanned-out frame
+/// (fullscreen games, fullscreen video) for streams that negotiated DMA-BUFs:
+/// its `before_stage_painted` handler returns early for shared-memory streams,
+/// and the stage is never painted under scanout, so nothing else fires either.
+/// Shared memory also forces a full-resolution GPU→CPU readback inside
+/// gnome-shell on every frame, which DMA-BUF avoids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// DMA-BUF buffers imported straight into GL and scaled on the GPU.
+    DmaBufGpu,
+    /// Shared-memory buffers scaled on the CPU. Fallback for compositors or
+    /// installs that cannot negotiate the above.
+    SharedMemory,
+}
+
+impl CaptureMode {
+    pub fn describe(self) -> &'static str {
+        match self {
+            CaptureMode::DmaBufGpu => "DMA-BUF, scaled on the GPU",
+            CaptureMode::SharedMemory => {
+                "shared memory, scaled on the CPU (fullscreen apps will not be captured on GNOME)"
+            }
+        }
+    }
+}
 
 /// Captures screen across platforms
 pub trait ScreenCapture {
@@ -44,6 +80,14 @@ pub trait ScreenCapture {
     /// this coordinate space no matter what resolution frames actually arrive at.
     fn source_size(&self) -> (u32, u32);
 
+    /// Total frames the source has delivered. Lets the sync loop tell a stalled
+    /// stream apart from a screen that simply is not changing — from the outside
+    /// those two look identical, and only one of them is a bug.
+    fn frames_captured(&self) -> u64;
+
+    /// Human-readable summary of how frames are being obtained, for startup output.
+    fn describe(&self) -> String;
+
     fn stop(&mut self) -> Result<()>; //unused, but keeping in interface as a reminder that thread is created in new()
 }
 
@@ -51,11 +95,15 @@ pub trait ScreenCapture {
 pub struct X11Capturer {
     monitor: Monitor,
     source_size: (u32, u32),
+    frames: AtomicU64,
 }
 
 pub struct WaylandCapturer {
     state: Arc<Mutex<StreamState>>,
+    /// Counted outside the mutex so the streaming thread never blocks to report.
+    frames: Arc<AtomicU64>,
     source_size: (u32, u32),
+    mode: CaptureMode,
 }
 
 /// Shared between the GStreamer streaming thread and the sync loop.
@@ -65,6 +113,8 @@ struct StreamState {
     frame: Option<Arc<RgbaImage>>,
     /// Learned from caps negotiated upstream of the scaler.
     source_size: Option<(u32, u32)>,
+    /// The mode of the pipeline currently running, once it is up.
+    mode: Option<CaptureMode>,
     /// Set when the pipeline thread dies, so startup fails instead of hanging.
     error: Option<String>,
 }
@@ -81,15 +131,26 @@ impl ScreenCapture for X11Capturer {
         Ok(Box::new(X11Capturer {
             monitor,
             source_size,
+            frames: AtomicU64::new(0),
         }))
     }
 
     fn capture_frame(&self) -> Result<Arc<RgbaImage>> {
-        Ok(Arc::new(self.monitor.capture_image()?))
+        let image = self.monitor.capture_image()?;
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        Ok(Arc::new(image))
     }
 
     fn source_size(&self) -> (u32, u32) {
         self.source_size
+    }
+
+    fn frames_captured(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
+    fn describe(&self) -> String {
+        "X11 screenshots".to_string()
     }
 
     fn stop(&mut self) -> Result<()> {
@@ -101,10 +162,16 @@ impl ScreenCapture for X11Capturer {
 impl ScreenCapture for WaylandCapturer {
     fn new() -> Result<Box<dyn ScreenCapture>> {
         let pipewire_id = Self::open_portal_session()?;
-        let state = Self::start_stream(pipewire_id)?;
-        let source_size = Self::await_first_frame(&state)?;
+        let frames = Arc::new(AtomicU64::new(0));
+        let state = Self::start_stream(pipewire_id, Arc::clone(&frames))?;
+        let (source_size, mode) = Self::await_first_frame(&state)?;
 
-        Ok(Box::new(WaylandCapturer { state, source_size }))
+        Ok(Box::new(WaylandCapturer {
+            state,
+            frames,
+            source_size,
+            mode,
+        }))
     }
 
     fn capture_frame(&self) -> Result<Arc<RgbaImage>> {
@@ -126,6 +193,14 @@ impl ScreenCapture for WaylandCapturer {
 
     fn source_size(&self) -> (u32, u32) {
         self.source_size
+    }
+
+    fn frames_captured(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
+    fn describe(&self) -> String {
+        format!("Wayland screencast via {}", self.mode.describe())
     }
 
     // This is a placeholder. Process will run for the entiretly of the program's lifecycle
@@ -214,22 +289,57 @@ impl WaylandCapturer {
 
     /// Spawns the GStreamer pipeline on its own thread, recording any failure into
     /// the shared state so startup can report it rather than spinning forever.
-    fn start_stream(pipewire_id: u32) -> Result<Arc<Mutex<StreamState>>> {
+    ///
+    /// Capture modes are tried in order. A mode that fails before delivering a
+    /// single frame is treated as unsupported here and the next one is tried; a
+    /// failure after frames have flowed is a genuine runtime error and is reported.
+    fn start_stream(
+        pipewire_id: u32,
+        frames: Arc<AtomicU64>,
+    ) -> Result<Arc<Mutex<StreamState>>> {
         let state = Arc::new(Mutex::new(StreamState::default()));
         let thread_state = Arc::clone(&state);
 
+        // ZYNC_FORCE_SHM exists so the fullscreen freeze can be reproduced on
+        // demand when comparing modes. It is not a supported configuration.
+        let force_shm = std::env::var("ZYNC_FORCE_SHM").is_ok_and(|value| value != "0");
+        let modes: &[CaptureMode] = if force_shm {
+            &[CaptureMode::SharedMemory]
+        } else {
+            &[CaptureMode::DmaBufGpu, CaptureMode::SharedMemory]
+        };
+
         thread::spawn(move || {
-            if let Err(e) = Self::run_pipeline(pipewire_id, &thread_state) {
-                if let Ok(mut guard) = thread_state.lock() {
-                    guard.error = Some(format!("{e:#}"));
+            let mut last_error = None;
+
+            for &mode in modes {
+                match Self::run_pipeline(pipewire_id, mode, &thread_state, &frames) {
+                    Ok(()) => return,
+                    Err(e) if frames.load(Ordering::Relaxed) > 0 => {
+                        last_error = Some(e);
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("Capture mode {mode:?} unavailable: {e:#}");
+                        last_error = Some(e);
+                    }
                 }
+            }
+
+            if let (Some(e), Ok(mut guard)) = (last_error, thread_state.lock()) {
+                guard.error = Some(format!("{e:#}"));
             }
         });
 
         Ok(state)
     }
 
-    fn run_pipeline(pipewire_id: u32, state: &Arc<Mutex<StreamState>>) -> Result<()> {
+    fn run_pipeline(
+        pipewire_id: u32,
+        mode: CaptureMode,
+        state: &Arc<Mutex<StreamState>>,
+        frames: &Arc<AtomicU64>,
+    ) -> Result<()> {
         gst::init().context("Failed to initialise GStreamer")?;
 
         let pipeline = gst::Pipeline::builder().name("zync-capture").build();
@@ -238,6 +348,21 @@ impl WaylandCapturer {
             .property("path", pipewire_id.to_string())
             .build()
             .context("Failed to create pipewiresrc; is gst-plugin-pipewire installed?")?;
+
+        // What we accept here is what pipewiresrc asks the compositor for. Only
+        // offering memory:DMABuf makes it request a format with a DRM modifier,
+        // which is the exact condition Mutter uses to decide whether to allocate
+        // DMA-BUFs — and therefore whether it will record scanned-out frames.
+        let source_filter = gst::ElementFactory::make("capsfilter")
+            .build()
+            .context("Failed to create source capsfilter")?;
+        let source_caps = match mode {
+            CaptureMode::DmaBufGpu => gst::Caps::builder("video/x-raw")
+                .features(["memory:DMABuf"])
+                .build(),
+            CaptureMode::SharedMemory => gst::Caps::builder("video/x-raw").build(),
+        };
+        source_filter.set_property("caps", &source_caps);
 
         // Leaky so the compositor is never blocked waiting on us. Only the newest
         // frame matters, and stale ones are exactly what causes visible lag.
@@ -250,12 +375,108 @@ impl WaylandCapturer {
         queue.set_property_from_str("leaky", "downstream");
 
         // Drop surplus frames here, before scaling and conversion are paid for.
-        // `max-rate` implies drop-only, so no frames are ever duplicated.
+        // drop-only is set explicitly: without it videorate back-fills timestamp
+        // gaps with duplicates, which after a stall (fullscreen app, sleep) means
+        // a burst of hundreds of identical frames arriving at once.
         let videorate = gst::ElementFactory::make("videorate")
             .property("max-rate", CAPTURE_MAX_FPS)
+            .property("drop-only", true)
+            .property("skip-to-first", true)
             .build()
             .context("Failed to create videorate")?;
 
+        let scaler = match mode {
+            CaptureMode::DmaBufGpu => Self::build_gpu_scaler()?,
+            CaptureMode::SharedMemory => Self::build_cpu_scaler()?,
+        };
+
+        let appsink = gst::ElementFactory::make("appsink")
+            .name("sink")
+            .build()
+            .context("Failed to create appsink")?
+            .downcast::<AppSink>()
+            .map_err(|_| anyhow!("appsink element was not an AppSink"))?;
+
+        appsink.set_max_buffers(1);
+        appsink.set_drop(true);
+        // Hand over the newest frame immediately instead of pacing to the pipeline
+        // clock. Clock-syncing a live capture only adds latency for our purposes.
+        appsink.set_property("sync", false);
+
+        let mut elements: Vec<&gst::Element> = vec![&src, &source_filter, &queue, &videorate];
+        elements.extend(scaler.iter());
+        elements.push(appsink.upcast_ref());
+
+        pipeline
+            .add_many(&elements)
+            .context("Failed to assemble capture pipeline")?;
+        gst::Element::link_many(&elements).context("Failed to link capture pipeline")?;
+
+        Self::probe_source_size(&queue, state)?;
+        Self::attach_frame_callback(&appsink, state, Arc::clone(frames));
+
+        if let Ok(mut guard) = state.lock() {
+            guard.mode = Some(mode);
+        }
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .context("Unable to start the capture pipeline")?;
+
+        let result = Self::watch_pipeline(&pipeline, mode, frames);
+        let _ = pipeline.set_state(gst::State::Null);
+        result
+    }
+
+    /// Imports DMA-BUFs into GL and scales there, so the full-resolution frame
+    /// never touches system memory. Only the small result is downloaded.
+    fn build_gpu_scaler() -> Result<Vec<gst::Element>> {
+        let missing = |name: &str| {
+            format!("Failed to create {name}; are the GStreamer OpenGL plugins installed?")
+        };
+
+        let upload = gst::ElementFactory::make("glupload")
+            .build()
+            .with_context(|| missing("glupload"))?;
+        let convert = gst::ElementFactory::make("glcolorconvert")
+            .build()
+            .with_context(|| missing("glcolorconvert"))?;
+        let scale = gst::ElementFactory::make("glcolorscale")
+            .build()
+            .with_context(|| missing("glcolorscale"))?;
+
+        let gl_filter = gst::ElementFactory::make("capsfilter")
+            .build()
+            .context("Failed to create GL capsfilter")?;
+        gl_filter.set_property(
+            "caps",
+            &gst::Caps::builder("video/x-raw")
+                .features(["memory:GLMemory"])
+                .field("format", "RGBA")
+                .field("width", CAPTURE_WIDTH)
+                .field("height", CAPTURE_HEIGHT)
+                .build(),
+        );
+
+        let download = gst::ElementFactory::make("gldownload")
+            .build()
+            .with_context(|| missing("gldownload"))?;
+
+        let out_filter = gst::ElementFactory::make("capsfilter")
+            .build()
+            .context("Failed to create output capsfilter")?;
+        out_filter.set_property(
+            "caps",
+            &gst::Caps::builder("video/x-raw")
+                .field("format", "RGBA")
+                .build(),
+        );
+
+        Ok(vec![upload, convert, scale, gl_filter, download, out_filter])
+    }
+
+    /// CPU conversion and scaling of shared-memory frames.
+    fn build_cpu_scaler() -> Result<Vec<gst::Element>> {
         // add-borders=false because letterbox bars would be averaged into the zone
         // colours. Stretching is harmless: zones are scaled per-axis independently,
         // so a zone still covers the same fraction of the screen either way.
@@ -271,79 +492,62 @@ impl WaylandCapturer {
         // Framerate is intentionally left out of the caps: pipewiresrc commonly
         // advertises a variable rate, which makes an exact framerate negotiation
         // fail outright. videorate's max-rate already bounds it.
-        let caps = gst::Caps::builder("video/x-raw")
-            .field("format", "RGBA")
-            .field("width", CAPTURE_WIDTH)
-            .field("height", CAPTURE_HEIGHT)
-            .build();
-        capsfilter.set_property("caps", &caps);
+        capsfilter.set_property(
+            "caps",
+            &gst::Caps::builder("video/x-raw")
+                .field("format", "RGBA")
+                .field("width", CAPTURE_WIDTH)
+                .field("height", CAPTURE_HEIGHT)
+                .build(),
+        );
 
-        let appsink = gst::ElementFactory::make("appsink")
-            .name("sink")
-            .build()
-            .context("Failed to create appsink")?
-            .downcast::<AppSink>()
-            .map_err(|_| anyhow!("appsink element was not an AppSink"))?;
+        Ok(vec![converter, capsfilter])
+    }
 
-        appsink.set_max_buffers(1);
-        appsink.set_drop(true);
-        // Hand over the newest frame immediately instead of pacing to the pipeline
-        // clock. Clock-syncing a live capture only adds latency for our purposes.
-        appsink.set_property("sync", false);
-
-        let elements = [
-            &src,
-            &queue,
-            &videorate,
-            &converter,
-            &capsfilter,
-            appsink.upcast_ref(),
-        ];
-        pipeline
-            .add_many(elements)
-            .context("Failed to assemble capture pipeline")?;
-        gst::Element::link_many(elements).context("Failed to link capture pipeline")?;
-
-        Self::probe_source_size(&converter, state)?;
-        Self::attach_frame_callback(&appsink, state);
-
-        pipeline
-            .set_state(gst::State::Playing)
-            .context("Unable to start the capture pipeline")?;
-
-        // Keeps this thread alive and surfaces pipeline errors, which the previous
-        // bare GLib main loop would have swallowed silently.
+    /// Keeps the streaming thread alive and surfaces pipeline errors, which the
+    /// original bare GLib main loop swallowed silently. Also judges whether a
+    /// mode is viable: a mode that produces neither a frame nor an error within
+    /// the negotiation window is abandoned rather than waited on forever.
+    fn watch_pipeline(
+        pipeline: &gst::Pipeline,
+        mode: CaptureMode,
+        frames: &Arc<AtomicU64>,
+    ) -> Result<()> {
         let bus = pipeline
             .bus()
             .ok_or_else(|| anyhow!("Capture pipeline has no bus"))?;
+        let started = Instant::now();
 
-        for msg in bus.iter_timed(gst::ClockTime::NONE) {
-            match msg.view() {
-                gst::MessageView::Error(err) => {
-                    let _ = pipeline.set_state(gst::State::Null);
-                    bail!(
-                        "{} ({})",
-                        err.error(),
-                        err.debug().unwrap_or_else(|| "no detail".into())
-                    );
+        loop {
+            if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(250)) {
+                match msg.view() {
+                    gst::MessageView::Error(err) => {
+                        bail!(
+                            "{} ({})",
+                            err.error(),
+                            err.debug().unwrap_or_else(|| "no detail".into())
+                        );
+                    }
+                    gst::MessageView::Eos(_) => bail!("Capture stream ended unexpectedly"),
+                    _ => {}
                 }
-                gst::MessageView::Eos(_) => {
-                    let _ = pipeline.set_state(gst::State::Null);
-                    bail!("Capture stream ended unexpectedly");
-                }
-                _ => {}
+            }
+
+            if frames.load(Ordering::Relaxed) == 0 && started.elapsed() > MODE_NEGOTIATION_TIMEOUT {
+                bail!(
+                    "{mode:?} produced no frames within {:?}",
+                    MODE_NEGOTIATION_TIMEOUT
+                );
             }
         }
-
-        Ok(())
     }
 
     /// Reads the display's native resolution off the caps upstream of the scaler.
     /// This is what lets zone coordinates stay in the user's own screen space.
-    fn probe_source_size(converter: &gst::Element, state: &Arc<Mutex<StreamState>>) -> Result<()> {
-        let sink_pad = converter
+    fn probe_source_size(element: &gst::Element, state: &Arc<Mutex<StreamState>>) -> Result<()> {
+        let sink_pad = element
             .static_pad("sink")
-            .ok_or_else(|| anyhow!("Scaler has no sink pad"))?;
+            .ok_or_else(|| anyhow!("Probe target has no sink pad"))?;
 
         let probe_state = Arc::clone(state);
 
@@ -368,7 +572,11 @@ impl WaylandCapturer {
         Ok(())
     }
 
-    fn attach_frame_callback(appsink: &AppSink, state: &Arc<Mutex<StreamState>>) {
+    fn attach_frame_callback(
+        appsink: &AppSink,
+        state: &Arc<Mutex<StreamState>>,
+        frames: Arc<AtomicU64>,
+    ) {
         let sink_state = Arc::clone(state);
 
         appsink.set_callbacks(
@@ -376,21 +584,22 @@ impl WaylandCapturer {
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-
                     let caps = sample.caps().ok_or(gst::FlowError::Error)?;
-                    let structure = caps.structure(0).ok_or(gst::FlowError::Error)?;
-                    let width = structure
-                        .get::<i32>("width")
-                        .map_err(|_| gst::FlowError::Error)? as u32;
-                    let height = structure
-                        .get::<i32>("height")
-                        .map_err(|_| gst::FlowError::Error)? as u32;
 
-                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    // Go through VideoFrameRef rather than a raw map: the GL download
+                    // path attaches a GstVideoMeta whose stride is the only reliable
+                    // source of row pitch, and the buffer may be larger than the image.
+                    let info = gst_video::VideoInfo::from_caps(caps)
+                        .map_err(|_| gst::FlowError::Error)?;
+                    let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info)
+                        .map_err(|_| gst::FlowError::Error)?;
+                    let data = frame.plane_data(0).map_err(|_| gst::FlowError::Error)?;
+                    let stride = frame.plane_stride()[0] as usize;
 
-                    if let Some(img) = pack_frame(map.as_slice(), width, height) {
+                    if let Some(img) = pack_frame(data, info.width(), info.height(), stride) {
                         let mut guard = sink_state.lock().map_err(|_| gst::FlowError::Error)?;
                         guard.frame = Some(Arc::new(img));
+                        frames.fetch_add(1, Ordering::Relaxed);
                     }
 
                     Ok(gst::FlowSuccess::Ok)
@@ -401,7 +610,7 @@ impl WaylandCapturer {
 
     /// Blocks until the pipeline yields a frame, failing fast if the streaming
     /// thread reported an error rather than spinning indefinitely.
-    fn await_first_frame(state: &Arc<Mutex<StreamState>>) -> Result<(u32, u32)> {
+    fn await_first_frame(state: &Arc<Mutex<StreamState>>) -> Result<((u32, u32), CaptureMode)> {
         let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
 
         loop {
@@ -414,8 +623,10 @@ impl WaylandCapturer {
                     bail!("Screen capture pipeline failed: {err}");
                 }
 
-                if let (Some(_), Some(size)) = (&guard.frame, guard.source_size) {
-                    return Ok(size);
+                if let (Some(_), Some(size), Some(mode)) =
+                    (&guard.frame, guard.source_size, guard.mode)
+                {
+                    return Ok((size, mode));
                 }
             }
 
@@ -428,11 +639,11 @@ impl WaylandCapturer {
     }
 }
 
-/// Copies a mapped GStreamer buffer into an `RgbaImage`, honouring row stride.
+/// Copies a mapped GStreamer plane into an `RgbaImage`, honouring row stride.
 ///
 /// GStreamer pads rows to alignment boundaries, so treating the mapping as tightly
 /// packed skews the image whenever stride exceeds `width * 4`.
-fn pack_frame(data: &[u8], width: u32, height: u32) -> Option<RgbaImage> {
+fn pack_frame(data: &[u8], width: u32, height: u32, stride: usize) -> Option<RgbaImage> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -440,13 +651,12 @@ fn pack_frame(data: &[u8], width: u32, height: u32) -> Option<RgbaImage> {
     let row_bytes = (width as usize).checked_mul(4)?;
     let expected = row_bytes.checked_mul(height as usize)?;
 
-    if data.len() == expected {
-        return RgbaImage::from_raw(width, height, data.to_vec());
-    }
-
-    let stride = data.len() / height as usize;
     if stride < row_bytes {
         return None;
+    }
+
+    if stride == row_bytes && data.len() >= expected {
+        return RgbaImage::from_raw(width, height, data[..expected].to_vec());
     }
 
     let mut packed = Vec::with_capacity(expected);
@@ -688,7 +898,7 @@ mod tests {
         data[0..8].copy_from_slice(&[255, 0, 0, 255, 255, 0, 0, 255]);
         data[12..20].copy_from_slice(&[0, 0, 255, 255, 0, 0, 255, 255]);
 
-        let image = pack_frame(&data, width, height).expect("padded frame should unpack");
+        let image = pack_frame(&data, width, height, stride).expect("padded frame should unpack");
 
         assert_eq!(image.get_pixel(1, 0)[0], 255, "first row should be red");
         assert_eq!(image.get_pixel(1, 1)[2], 255, "second row should be blue");
@@ -698,7 +908,7 @@ mod tests {
     fn tightly_packed_frames_are_unpacked_unchanged() {
         let data: Vec<u8> = [255, 0, 0, 255, 0, 0, 255, 255].to_vec();
 
-        let image = pack_frame(&data, 2, 1).expect("packed frame should unpack");
+        let image = pack_frame(&data, 2, 1, 8).expect("packed frame should unpack");
 
         assert_eq!(image.get_pixel(0, 0)[0], 255);
         assert_eq!(image.get_pixel(1, 0)[2], 255);

@@ -217,6 +217,12 @@ pub struct SyncEngine<'a> {
     downsample: u8,
     interval_samples: Vec<u64>,
     last_report_time: Instant,
+    /// Diagnostics, enabled with ZYNC_DEBUG=1. Distinguishes a stalled capture
+    /// stream from a static screen or an over-eager command budget.
+    debug: bool,
+    frames_at_last_report: u64,
+    commands_sent: u64,
+    commands_deferred: u64,
 }
 
 impl<'a> SyncEngine<'a> {
@@ -231,6 +237,10 @@ impl<'a> SyncEngine<'a> {
             downsample,
             interval_samples: Vec::new(),
             last_report_time: Instant::now(), //defining on creation as default value. updates when Run() starts.
+            debug: std::env::var("ZYNC_DEBUG").is_ok_and(|value| value != "0"),
+            frames_at_last_report: 0,
+            commands_sent: 0,
+            commands_deferred: 0,
         }
     }
 
@@ -251,9 +261,41 @@ impl<'a> SyncEngine<'a> {
                 Local::now().format("%H:%M:%S"),
                 1000 as f32 / avg,
             );
+
+            if self.debug {
+                self.report_diagnostics();
+            }
+
             self.interval_samples.clear();
             self.last_report_time = Instant::now();
         }
+    }
+
+    /// A stalled capture stream and a screen that is not changing produce exactly
+    /// the same visible result — lights that never move — so report the frame
+    /// counter alongside what the zones actually saw.
+    fn report_diagnostics(&mut self) {
+        let frames = self.screen.frames_captured();
+        let new_frames = frames.saturating_sub(self.frames_at_last_report);
+        self.frames_at_last_report = frames;
+
+        let colors = self
+            .zones
+            .iter()
+            .map(|area| match &area.previous_sample {
+                Some(sample) => format!("{:>3},{:>3},{:>3}", sample.r, sample.g, sample.b),
+                None => "  -,  -,  -".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("  |  ");
+
+        println!(
+            "\t\tframes: {:>4}   sent: {:>3}   deferred: {:>3}   zones: {}",
+            new_frames, self.commands_sent, self.commands_deferred, colors,
+        );
+
+        self.commands_sent = 0;
+        self.commands_deferred = 0;
     }
 
     pub fn run(&mut self) -> Result<()>{
@@ -282,6 +324,7 @@ impl<'a> SyncEngine<'a> {
                 // change stays pending and goes out as soon as the mesh has headroom,
                 // rather than being silently dropped.
                 if !self.budget.try_consume() {
+                    self.commands_deferred += 1;
                     continue;
                 }
 
@@ -295,6 +338,7 @@ impl<'a> SyncEngine<'a> {
 
                 area.zone_light.set_light(color, Some(transition))?;
                 area.previous_sample = Some(sample);
+                self.commands_sent += 1;
             }
 
             self.send_fps_message();

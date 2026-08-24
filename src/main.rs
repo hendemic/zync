@@ -45,6 +45,16 @@ fn main() -> Result<()> {
     let screen = new_screen()?;
     let source_size = screen.source_size();
 
+    // Worth printing plainly: if the size does not match the monitor you expected,
+    // the portal handed us a single window rather than the whole display; and the
+    // capture mode decides whether fullscreen apps can be captured on GNOME.
+    println!(
+        "Capture source: {}x{} (zones are configured in these coordinates)\nCapture mode: {}",
+        source_size.0,
+        source_size.1,
+        screen.describe()
+    );
+
     let light_failures = Arc::new(AtomicU64::new(0));
 
     let adaptive_rate = AdaptiveRate::new_from_fps(
