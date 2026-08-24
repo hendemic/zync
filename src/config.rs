@@ -64,6 +64,9 @@ lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
     service: "Zigbee2MQTT"
     brightness: 0.8                   # percent brightness of light. range is 0-1. anything over 1 will be capped to 1 by the app.
+    is_group: false                   # set true for a Z2M group. Group commands are Zigbee broadcasts, which a mesh
+                                      # only sustains at about 1/s, so groups are paced at 1 update/s (devices: 4/s).
+    # max_updates_per_sec: 2          # optional override of that pacing for this light.
 
 # Zones are always given in your display's native resolution. The app captures at
 # a much smaller internal resolution for performance and converts these

@@ -16,8 +16,16 @@ const TRANSITION_SOFTNESS: f32 = 0.4;
 const TRANSITION_MIN: f32 = 0.02;
 const TRANSITION_MAX: f32 = 1.0;
 
-/// Zigbee groups multicast, and a saturated mesh answers with BUSY rather than
-/// queueing, so the safe sustained command rate is far below any frame rate.
+/// How a reported delivery failure cuts a light's rate, and how the rate comes
+/// back. Recovery waits for a quiet period first so that a burst of failures
+/// cannot be undone in the gaps between its own log lines.
+const BUDGET_FAILURE_BACKOFF: f32 = 0.5;
+const BUDGET_FLOOR_PER_SEC: f32 = 0.25;
+const BUDGET_RECOVERY_DELAY: Duration = Duration::from_secs(3);
+/// Fraction of the configured rate regained per quiet second.
+const BUDGET_RECOVERY_PER_SEC: f32 = 0.1;
+
+/// Overall ceiling across every light. Per-light budgets do the real pacing.
 fn default_max_commands_per_sec() -> f32 {
     6.0
 }
@@ -37,38 +45,71 @@ pub struct PerformanceConfig {
 
 /// Token bucket bounding how fast commands reach the light network.
 ///
-/// This exists because CPU work time is a poor proxy for mesh health: capture got
-/// dramatically cheaper on Wayland, which removed the accidental backpressure that
-/// had been keeping command rates survivable, and the mesh flooded.
+/// Nothing downstream of us expires a command: MQTT QoS 0 has no TTL, and
+/// Zigbee2MQTT's adapter queue holds requests indefinitely and retries them.
+/// Once a command is published it will be delivered, however stale. So the only
+/// way to keep the lights current is to never hand the mesh more than it can
+/// deliver, and to cut the rate the moment it reports it cannot.
 struct CommandBudget {
     tokens: f32,
     capacity: f32,
+    max_rate: f32,
     refill_per_sec: f32,
     last_refill: Instant,
+    last_failure: Option<Instant>,
 }
 
 impl CommandBudget {
     fn new(commands_per_sec: f32) -> Self {
         let rate = commands_per_sec.max(0.1);
         CommandBudget {
-            tokens: rate,
-            capacity: rate.max(1.0),
+            tokens: 1.0,
+            // A small burst allowance is enough; anything larger just becomes a
+            // backlog inside Zigbee2MQTT.
+            capacity: rate.max(1.0).min(2.0),
+            max_rate: rate,
             refill_per_sec: rate,
             last_refill: Instant::now(),
+            last_failure: None,
         }
     }
 
-    fn try_consume(&mut self) -> bool {
-        let elapsed = self.last_refill.elapsed().as_secs_f32();
-        self.last_refill = Instant::now();
-        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+    fn refill(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f32();
+        self.last_refill = now;
 
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            true
-        } else {
-            false
+        let quiet = self
+            .last_failure
+            .is_none_or(|at| now.duration_since(at) >= BUDGET_RECOVERY_DELAY);
+        if quiet && self.refill_per_sec < self.max_rate {
+            self.refill_per_sec = (self.refill_per_sec
+                + self.max_rate * BUDGET_RECOVERY_PER_SEC * elapsed)
+                .min(self.max_rate);
         }
+
+        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+    }
+
+    fn has_token(&mut self) -> bool {
+        self.refill();
+        self.tokens >= 1.0
+    }
+
+    /// Caller must have checked `has_token`.
+    fn take(&mut self) {
+        self.tokens -= 1.0;
+    }
+
+    fn on_failure(&mut self) {
+        self.refill_per_sec = (self.refill_per_sec * BUDGET_FAILURE_BACKOFF).max(BUDGET_FLOOR_PER_SEC);
+        // Drop any saved-up burst too; the mesh has just said it is full.
+        self.tokens = self.tokens.min(1.0);
+        self.last_failure = Some(Instant::now());
+    }
+
+    fn rate(&self) -> f32 {
+        self.refill_per_sec
     }
 }
 
@@ -77,15 +118,46 @@ pub struct ZonePair<'a>{
     zone: ZoneSampler,
     zone_light: LightController<'a>,
     previous_sample: Option<ZoneColor>,
+    /// Paced per light, because a congested group must not throttle a healthy
+    /// device on the same screen.
+    budget: CommandBudget,
+    /// Delivery failures Zigbee2MQTT attributed to this light.
+    failures: Arc<AtomicU64>,
+    failures_seen: u64,
+    failures_in_interval: u64,
 }
 
 impl<'a> ZonePair<'a> {
-    pub fn new (zone: ZoneSampler, zone_light: LightController<'a>, previous_sample: Option<ZoneColor>) -> Self {
-        ZonePair {zone, zone_light, previous_sample}
+    pub fn new (zone: ZoneSampler, zone_light: LightController<'a>, failures: Arc<AtomicU64>) -> Self {
+        let budget = CommandBudget::new(zone_light.updates_per_sec());
+        ZonePair {
+            zone,
+            zone_light,
+            previous_sample: None,
+            budget,
+            failures,
+            failures_seen: 0,
+            failures_in_interval: 0,
+        }
+    }
+
+    /// Folds failures reported since the last tick into the budget. One backoff
+    /// per tick regardless of count: a saturated mesh logs dozens of lines per
+    /// second, and halving once per line would crater the rate instantly.
+    fn absorb_failures(&mut self) {
+        let observed = self.failures.load(Ordering::Relaxed);
+        let new_failures = observed.saturating_sub(self.failures_seen);
+        self.failures_seen = observed;
+
+        if new_failures > 0 {
+            self.budget.on_failure();
+            self.failures_in_interval += new_failures;
+        }
     }
 }
 
-///Adaptive rate struct controls framerate in the event of message bounces.
+/// Paces the capture loop on CPU work time only. Mesh health is handled by the
+/// per-light budgets; slowing the loop never reduced the command rate anyway.
 pub struct AdaptiveRate {
     target_interval: u64,
     current_interval: u64,
@@ -93,15 +165,11 @@ pub struct AdaptiveRate {
     consecutive_failures: u16,
     consecutive_successes: u16,
     percent_thread_work: f32,
-    /// Delivery failures reported by the light service. This is the only signal
-    /// that actually reflects mesh health — CPU timing cannot observe it.
-    light_failures: Arc<AtomicU64>,
-    last_seen_failures: u64,
 }
 
 impl AdaptiveRate {
     #[allow(dead_code)] // not using new. keeping for testing.
-    pub fn new (target_interval: u64, current_interval: u64, max_interval: u64, percent_thread_work: f32, light_failures: Arc<AtomicU64>) -> Self {
+    pub fn new (target_interval: u64, current_interval: u64, max_interval: u64, percent_thread_work: f32) -> Self {
         AdaptiveRate {
             target_interval,
             current_interval,
@@ -109,11 +177,9 @@ impl AdaptiveRate {
             consecutive_failures: 0,
             consecutive_successes: 0,
             percent_thread_work,
-            light_failures,
-            last_seen_failures: 0,
         }
     }
-    pub fn new_from_fps (fps: u64, max_interval: u64, percent_thread_work: f32, light_failures: Arc<AtomicU64>) -> Self {
+    pub fn new_from_fps (fps: u64, max_interval: u64, percent_thread_work: f32) -> Self {
         let interval = 1000 / fps.max(1);
         AdaptiveRate {
             target_interval: interval,
@@ -122,8 +188,6 @@ impl AdaptiveRate {
             consecutive_failures: 0,
             consecutive_successes: 0,
             percent_thread_work,
-            light_failures,
-            last_seen_failures: 0,
         }
     }
     /// After successful messages, this function increases the framerate back toward its target.
@@ -145,13 +209,6 @@ impl AdaptiveRate {
 
         self.consecutive_successes += 1;
         self.consecutive_failures = 0;
-
-        // println!("{}\tFramerate restored:\tNew interval: {:>4}ms  Consecutive successes: {:>2}",
-        //     Local::now().format("%H:%M:%S%.3f"),
-        //     self.current_interval,
-        //     self.consecutive_successes,
-        // );
-
     }
     /// Refresh rate is dropped by 20ms each failure. If we've failed 10 times it sets it to the
     /// max thats configured in order to wait for the mesh to recover.
@@ -168,28 +225,13 @@ impl AdaptiveRate {
 
         self.consecutive_successes = 0;
         self.consecutive_failures += 1;
-
-        // println!("{}\tFramerate throttled:\tNew interval: {:>4}ms  Consecutive failures: {:>3}",
-        //     Local::now().format("%H:%M:%S%.3f"),
-        //     self.current_interval,
-        //     self.consecutive_failures,
-        // );
-
     }
     fn adjust_timing(&mut self, work_time: u64) -> u64 {
 
-        // Delivery failures observed since the last tick. These drive throttling now;
-        // work time alone made Wayland speed up into an already-saturated mesh,
-        // because its capture is a cheap buffer read rather than a real screen grab.
-        let observed = self.light_failures.load(Ordering::Relaxed);
-        let new_failures = observed.saturating_sub(self.last_seen_failures);
-        self.last_seen_failures = observed;
-
-        // Work time is kept only as a guard against the loop starving the machine.
+        // Purely a guard against the loop starving the machine.
         let throttle_threshold = (self.current_interval as f32 * self.percent_thread_work) as u64;
-        let cpu_pressure = work_time > throttle_threshold;
 
-        if new_failures > 0 || cpu_pressure {
+        if work_time > throttle_threshold {
             self.throttle_framerate();
         } else {
             self.restore_framerate();
@@ -223,6 +265,7 @@ pub struct SyncEngine<'a> {
     frames_at_last_report: u64,
     commands_sent: u64,
     commands_deferred: u64,
+    max_work_ms: u64,
 }
 
 impl<'a> SyncEngine<'a> {
@@ -241,6 +284,7 @@ impl<'a> SyncEngine<'a> {
             frames_at_last_report: 0,
             commands_sent: 0,
             commands_deferred: 0,
+            max_work_ms: 0,
         }
     }
 
@@ -273,7 +317,8 @@ impl<'a> SyncEngine<'a> {
 
     /// A stalled capture stream and a screen that is not changing produce exactly
     /// the same visible result — lights that never move — so report the frame
-    /// counter alongside what the zones actually saw.
+    /// counter alongside what the zones actually saw, plus each light's current
+    /// pacing so a backed-off budget is visible rather than inferred.
     fn report_diagnostics(&mut self) {
         let frames = self.screen.frames_captured();
         let new_frames = frames.saturating_sub(self.frames_at_last_report);
@@ -289,13 +334,31 @@ impl<'a> SyncEngine<'a> {
             .collect::<Vec<_>>()
             .join("  |  ");
 
+        let lights = self
+            .zones
+            .iter()
+            .map(|area| {
+                format!(
+                    "{} {:.2}/s fail {}",
+                    area.zone_light.get_light_name(),
+                    area.budget.rate(),
+                    area.failures_in_interval,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("  |  ");
+
         println!(
-            "\t\tframes: {:>4}   sent: {:>3}   deferred: {:>3}   zones: {}",
-            new_frames, self.commands_sent, self.commands_deferred, colors,
+            "\t\tframes: {:>4}   sent: {:>3}   deferred: {:>3}   work max: {:>3}ms   zones: {}\n\t\tlights: {}",
+            new_frames, self.commands_sent, self.commands_deferred, self.max_work_ms, colors, lights,
         );
 
         self.commands_sent = 0;
         self.commands_deferred = 0;
+        self.max_work_ms = 0;
+        for area in &mut self.zones {
+            area.failures_in_interval = 0;
+        }
     }
 
     pub fn run(&mut self) -> Result<()>{
@@ -320,10 +383,22 @@ impl<'a> SyncEngine<'a> {
                     continue;
                 }
 
+                let color = MessageColor::from(sample);
+
+                // A change visible in the sample can still round to the command the
+                // light already has. Record it and move on rather than spend budget.
+                if !area.zone_light.needs_update(color) {
+                    area.previous_sample = Some(sample);
+                    continue;
+                }
+
+                area.absorb_failures();
+
                 // Out of budget: deliberately leave previous_sample untouched so the
                 // change stays pending and goes out as soon as the mesh has headroom,
-                // rather than being silently dropped.
-                if !self.budget.try_consume() {
+                // rather than being silently dropped. Both budgets are checked before
+                // either is spent.
+                if !(area.budget.has_token() && self.budget.has_token()) {
                     self.commands_deferred += 1;
                     continue;
                 }
@@ -334,16 +409,18 @@ impl<'a> SyncEngine<'a> {
                     None => TRANSITION_MAX,
                 };
 
-                let color = MessageColor::from(sample);
-
-                area.zone_light.set_light(color, Some(transition))?;
+                if area.zone_light.set_light(color, Some(transition))? {
+                    area.budget.take();
+                    self.budget.take();
+                    self.commands_sent += 1;
+                }
                 area.previous_sample = Some(sample);
-                self.commands_sent += 1;
             }
 
             self.send_fps_message();
 
             let elapsed_time = now.elapsed().as_millis() as u64;
+            self.max_work_ms = self.max_work_ms.max(elapsed_time);
             thread::sleep(Duration::from_millis(self.rate.adjust_timing(elapsed_time)));
         }
     }

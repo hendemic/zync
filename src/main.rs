@@ -19,6 +19,9 @@ mod sync;
 /// mesh tells us a command was refused, since publishes are fire-and-forget.
 const Z2M_LOG_TOPIC: &str = "zigbee2mqtt/bridge/logging";
 
+/// One failure counter per configured light, keyed by its Zigbee2MQTT name.
+type FailureCounters = HashMap<String, Arc<AtomicU64>>;
+
 #[derive(Deserialize)]
 struct Z2MLogMessage {
     level: String,
@@ -27,10 +30,19 @@ struct Z2MLogMessage {
 
 /// Detects the "failed to send / BUSY" class of log entry that indicates the
 /// Zigbee mesh is congested and we should back off.
-fn is_delivery_failure(payload: &[u8]) -> bool {
+fn parse_delivery_failure(payload: &[u8]) -> Option<Z2MLogMessage> {
     serde_json::from_slice::<Z2MLogMessage>(payload)
-        .map(|log| log.level == "error" && log.message.contains("failed"))
-        .unwrap_or(false)
+        .ok()
+        .filter(|log| log.level == "error" && log.message.contains("failed"))
+}
+
+/// Pulls the light name out of Zigbee2MQTT's
+/// `Publish 'set' 'color' to '<name>' failed: ...` wording, so a failure can be
+/// charged to the light that caused it rather than to every light.
+fn failed_light_name(message: &str) -> Option<&str> {
+    let start = message.find(" to '")? + " to '".len();
+    let end = message[start..].find('\'')? + start;
+    Some(&message[start..end])
 }
 
 fn main() -> Result<()> {
@@ -55,15 +67,18 @@ fn main() -> Result<()> {
         screen.describe()
     );
 
-    let light_failures = Arc::new(AtomicU64::new(0));
+    let failure_counters: FailureCounters = config
+        .lights
+        .iter()
+        .map(|light| (light.light_name.clone(), Arc::new(AtomicU64::new(0))))
+        .collect();
 
     let adaptive_rate = AdaptiveRate::new_from_fps(
                             config.performance.max_fps,
                             config.performance.max_delay,
                             config.performance.percent_thread_work,
-                            Arc::clone(&light_failures),
     );
-    let zone_map = extract_zones_and_lights(config.lights, config.zones, &client, source_size)?;
+    let zone_map = extract_zones_and_lights(config.lights, config.zones, &client, source_size, &failure_counters)?;
 
     client.subscribe(Z2M_LOG_TOPIC, QoS::AtMostOnce)
         .context("Failed to subscribe to the Zigbee2MQTT log topic")?;
@@ -75,9 +90,26 @@ fn main() -> Result<()> {
     // it is required regardless of whether we inspect the messages.
     thread::spawn(move || {
         for event in connection.iter() {
-            if let Ok(Event::Incoming(Packet::Publish(publish))) = event {
-                if publish.topic == Z2M_LOG_TOPIC && is_delivery_failure(&publish.payload) {
-                    light_failures.fetch_add(1, Ordering::Relaxed);
+            let Ok(Event::Incoming(Packet::Publish(publish))) = event else {
+                continue;
+            };
+            if publish.topic != Z2M_LOG_TOPIC {
+                continue;
+            }
+            let Some(log) = parse_delivery_failure(&publish.payload) else {
+                continue;
+            };
+
+            match failed_light_name(&log.message).and_then(|name| failure_counters.get(name)) {
+                Some(counter) => {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                // Unattributable failures still mean the mesh is struggling, so
+                // every light backs off rather than none.
+                None => {
+                    for counter in failure_counters.values() {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -88,12 +120,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn extract_zones_and_lights(
+fn extract_zones_and_lights<'a>(
     lights: Vec<LightConfig>,
     zones: Vec<ZoneConfig>,
-    client: &Client,
+    client: &'a Client,
     source_size: (u32, u32),
-) -> Result<Vec<ZonePair<'_>>>{
+    failure_counters: &FailureCounters,
+) -> Result<Vec<ZonePair<'a>>>{
 
     //initialize LightController instances and assemble in light_controllers hashmap
     let mut light_controllers = HashMap::new();
@@ -115,10 +148,40 @@ fn extract_zones_and_lights(
     let mut zone_map: Vec<ZonePair> = Vec::new();
 
     for zone in zone_samplers {
-        let light_controller = light_controllers.remove(&zone.get_light_name())
-            .ok_or_else(|| anyhow::anyhow!("Zone references unknown light: {}", &zone.get_light_name()))?;
-        let pair = ZonePair::new(zone, light_controller, None);
-        zone_map.push(pair);
+        let name = zone.get_light_name();
+        let light_controller = light_controllers.remove(&name)
+            .ok_or_else(|| anyhow::anyhow!("Zone references unknown light: {}", name))?;
+        let failures = failure_counters
+            .get(&name)
+            .map(Arc::clone)
+            .ok_or_else(|| anyhow::anyhow!("No failure counter for light: {}", name))?;
+        zone_map.push(ZonePair::new(zone, light_controller, failures));
     }
     Ok(zone_map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_light_name_from_z2m_failure_line() {
+        let message = "Publish 'set' 'color' to 'mikes-office-monitor-top' failed: 'Error: Command 12 lightingColorCtrl.moveToColor(...) failed (~x~> [ZCL GROUP groupId=12] Failed to send with status=BUSY.)'";
+
+        assert_eq!(failed_light_name(message), Some("mikes-office-monitor-top"));
+    }
+
+    #[test]
+    fn unrelated_failure_lines_have_no_light_name() {
+        assert_eq!(failed_light_name("Delivery of MULTICAST failed for '65533'."), None);
+    }
+
+    #[test]
+    fn only_error_level_failures_count() {
+        let error = br#"{"level":"error","message":"Publish 'set' 'color' to 'x' failed: BUSY","namespace":"z2m"}"#;
+        let info = br#"{"level":"info","message":"something failed but only informationally","namespace":"z2m"}"#;
+
+        assert!(parse_delivery_failure(error).is_some());
+        assert!(parse_delivery_failure(info).is_none());
+    }
 }
