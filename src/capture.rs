@@ -23,9 +23,13 @@ use xcap::*;
 const CAPTURE_WIDTH: i32 = 640;
 const CAPTURE_HEIGHT: i32 = 360;
 
-/// Frames arriving faster than this are dropped before any scaling or colour
-/// conversion is paid for. Well above the rate lights can physically follow.
-const CAPTURE_MAX_FPS: i32 = 15;
+/// Ceiling on frames per second, negotiated with the compositor as the stream's
+/// max-framerate so it throttles *before* doing any work on our behalf. Mutter
+/// otherwise defaults this to the monitor refresh rate and performs a scanout
+/// copy plus a PipeWire buffer round-trip for every one of them, inside
+/// gnome-shell — at 240Hz that is most of the screencast's CPU cost. videorate
+/// enforces the same ceiling locally for compositors that ignore the hint.
+const CAPTURE_MAX_FPS: i32 = 30;
 
 /// Portal negotiation blocks on the user picking a monitor, so this is generous.
 const PORTAL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -356,11 +360,15 @@ impl WaylandCapturer {
         let source_filter = gst::ElementFactory::make("capsfilter")
             .build()
             .context("Failed to create source capsfilter")?;
+        let max_framerate = gst::Fraction::new(CAPTURE_MAX_FPS, 1);
         let source_caps = match mode {
             CaptureMode::DmaBufGpu => gst::Caps::builder("video/x-raw")
                 .features(["memory:DMABuf"])
+                .field("max-framerate", max_framerate)
                 .build(),
-            CaptureMode::SharedMemory => gst::Caps::builder("video/x-raw").build(),
+            CaptureMode::SharedMemory => gst::Caps::builder("video/x-raw")
+                .field("max-framerate", max_framerate)
+                .build(),
         };
         source_filter.set_property("caps", &source_caps);
 
