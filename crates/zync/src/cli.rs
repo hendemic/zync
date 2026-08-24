@@ -49,8 +49,12 @@ impl Command {
 /// Wires the adapters onto the application layer and runs until told to stop.
 fn start() -> Result<()> {
     let config = config::load_or_init()?;
+    let instance = config::resolve_instance(config.instance.as_deref());
+    info!(instance, "starting");
 
-    let bus = Arc::new(MqttBus::connect(&config.mqtt).context("Could not connect to MQTT")?);
+    let bus = Arc::new(
+        MqttBus::connect(&config.mqtt, &instance).context("Could not connect to MQTT")?,
+    );
     let sink = Z2mSink::new(Arc::clone(&bus), &config)?;
     let frames = open_frame_source()?;
 
@@ -60,7 +64,7 @@ fn start() -> Result<()> {
     // Every way of stopping converges on the same channel, which is why none of
     // them needs its own teardown path — and why the lights are handed back the
     // same way whether the request came from a signal or from the network.
-    mqtt::spawn_control_listener(&bus, &config.mqtt.name, control.clone())?;
+    mqtt::spawn_control_listener(&bus, &instance, control.clone())?;
     let on_signal = control.clone();
     ctrlc::set_handler(move || {
         info!("interrupt received; stopping");
@@ -83,8 +87,12 @@ fn start() -> Result<()> {
 fn stop() -> Result<()> {
     let config = config::load_from(&config::config_path()?)?;
 
-    mqtt::request_shutdown(&config.mqtt)?;
-    println!("Stopping zync.");
+    // Resolved the same way `start` resolves it, so a stop run on this machine
+    // reaches this machine's instance and not another one on the same broker.
+    let instance = config::resolve_instance(config.instance.as_deref());
+
+    mqtt::request_shutdown(&config.mqtt, &instance)?;
+    println!("Stopping zync ({instance}).");
 
     Ok(())
 }

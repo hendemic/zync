@@ -31,12 +31,17 @@ On first run `zync start` creates a commented config at `~/.config/zync/config.y
 
 Stopping — with `zync stop`, with Ctrl-C, or by the process dying — returns the lights to whatever they were showing before syncing started. `on_stop` in the config chooses that behaviour.
 
-`zync stop` reaches the running instance over your MQTT broker, so it works from another terminal, another shell, or a script. Two topics are involved, both namespaced by your `mqtt.name`:
+`zync stop` reaches the running instance over your MQTT broker, so it works from another terminal, another shell, or a script. Two topics are involved, both namespaced by the instance name:
 
 | Topic | Purpose |
 |---|---|
-| `zync/<name>/status` | retained `online` / `offline`, with `offline` as the last will |
-| `zync/<name>/control` | accepts `shutdown` |
+| `zync/<instance>/status` | retained `online` / `offline`, with `offline` as the last will |
+| `zync/<instance>/control` | accepts `shutdown` |
+
+### Running on more than one machine
+The instance name defaults to your hostname, so pointing two machines at the same broker works without any config change — even if you copied `config.yaml` between them. It sets both the MQTT client id and the topics above, and both need to be unique per machine: a shared client id makes the broker disconnect each instance in turn (MQTT requires it), and a shared control topic means `zync stop` may reach the wrong machine.
+
+Set `instance:` in the config only if you want a name other than the hostname.
 
 ### Files
 
@@ -58,6 +63,13 @@ mqtt:
   password: "password"      # optional depending on broker config
 
 downsample_factor: 20       # pixel stride, in native display pixels
+
+# Names this machine on the broker. Defaults to your hostname, which is usually
+# what you want. Two machines pointed at the same broker must not share it: it
+# sets both the MQTT client id and the topics `zync stop` uses, so a shared value
+# means the two instances disconnect each other and `zync stop` may hit the wrong
+# one. Only set this if you want a name other than the hostname.
+# instance: "gaming-rig"
 
 # What to do with the lights when syncing stops (zync stop, Ctrl-C, or a crash):
 #   restore  put each light back the way it was before syncing started, falling
@@ -115,6 +127,7 @@ performance:
   - Earlier versions throttled on CPU work time alone. That only ever worked on X11, where a screen grab is genuinely expensive; on Wayland the capture is a cheap buffer read, so the loop never backed off and flooded the Zigbee mesh instead.
 - `max_commands_per_sec` puts a hard ceiling on commands reaching the mesh, independent of framerate. Zone updates that exceed the budget stay pending rather than being dropped.
 - Rotating log files, and the Wayland monitor picker only appears once — the portal's restore token is persisted.
+- Multiple machines can sync against one broker; each is namespaced by its hostname unless `instance` says otherwise.
 
 ## Architecture
 Three crates, so the dependency direction is enforced by the compiler rather than by review. See `dev-notes/architecture.md`.
@@ -164,4 +177,6 @@ The portal's restore token is saved to `~/.local/state/zync/state.json`. Delete 
 Lower `max_commands_per_sec` in the config. Groups are sent as multicast and will saturate the mesh well below any frame rate you'd want to run at.
 
 ### `zync stop` says no running instance was found
-It looks for the retained `zync/<name>/status` message. If your broker was restarted after `zync start`, that retained message is gone and `zync stop` can't see the instance — use Ctrl-C in the terminal running it instead.
+It looks for the retained `zync/<instance>/status` message, and prints the instance name it looked for. Two reasons it comes up empty:
+- Your broker was restarted after `zync start`, so the retained message is gone. Use Ctrl-C in the terminal running it instead.
+- The instance name differs between the two invocations, e.g. `instance:` is set in one config and not another. `zync start` logs the name it registered under.

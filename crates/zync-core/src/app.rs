@@ -637,6 +637,7 @@ mod tests {
                 max_commands_per_sec,
             },
             on_stop: StopPolicy::Restore,
+            instance: None,
         }
     }
 

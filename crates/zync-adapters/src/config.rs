@@ -8,12 +8,58 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use tracing::{debug, warn};
 use zync_core::domain::Config;
 
 const CONFIG_FILE: &str = "config.yaml";
 const STATE_FILE: &str = "state.json";
 const APP_DIR: &str = "zync";
+
+/// Last resort when the system will not tell us its hostname.
+const DEFAULT_INSTANCE: &str = "default";
+
+/// Names this installation on the broker.
+///
+/// Two machines pointed at one broker must not share this. The MQTT client id has
+/// to be unique per broker — MQTT 3.1.1 §3.1.4 requires the broker to disconnect
+/// the older client when a new one connects with the same id, and since the event
+/// loop reconnects, two instances sharing an id disconnect each other in a loop.
+/// The control topic then decides which instance `zync stop` actually reaches.
+///
+/// Defaulting to the hostname means a config file copied to a second machine
+/// works without being edited, which is the way this collision would otherwise
+/// be met in practice.
+pub fn resolve_instance(configured: Option<&str>) -> String {
+    if let Some(name) = configured.map(sanitize_topic_level).filter(|n| !n.is_empty()) {
+        return name;
+    }
+
+    hostname::get()
+        .ok()
+        .map(|host| sanitize_topic_level(&host.to_string_lossy()))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            warn!(
+                "no instance name configured and the hostname is unavailable; using \
+                 '{DEFAULT_INSTANCE}'. Set `instance:` in the config if more than one \
+                 machine uses this broker."
+            );
+            DEFAULT_INSTANCE.to_string()
+        })
+}
+
+/// Replaces what MQTT will not accept inside a single topic level. Hostnames are
+/// normally already safe; a configured name is free text.
+fn sanitize_topic_level(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| match c {
+            '/' | '+' | '#' => '-',
+            c if c.is_control() || c.is_whitespace() => '-',
+            c => c,
+        })
+        .collect()
+}
 
 pub fn config_dir() -> Result<PathBuf> {
     Ok(dirs::config_dir()
@@ -138,6 +184,13 @@ mqtt:
 
 downsample_factor: 20       # pixel stride, in native display pixels
 
+# Names this machine on the broker. Defaults to your hostname, which is usually
+# what you want. Two machines pointed at the same broker must not share it: it
+# sets both the MQTT client id and the topics `zync stop` uses, so a shared value
+# means the two instances disconnect each other and `zync stop` may hit the wrong
+# one. Only set this if you want a name other than the hostname.
+# instance: "gaming-rig"
+
 # What to do with the lights when syncing stops (zync stop, Ctrl-C, or a crash):
 #   restore  put each light back the way it was before syncing started, falling
 #            back to its fallback_state if that could not be read
@@ -195,6 +248,41 @@ mod tests {
         let config: Config = serde_yaml::from_str(EXAMPLE_CONFIG).expect("example must parse");
 
         assert!(config.validate().is_ok(), "example must be a usable configuration");
+    }
+
+    #[test]
+    fn a_configured_instance_name_wins() {
+        assert_eq!(resolve_instance(Some("gaming-rig")), "gaming-rig");
+    }
+
+    /// An empty or blank name in the config must not become an empty topic level.
+    #[test]
+    fn a_blank_instance_name_falls_back_to_the_hostname() {
+        let resolved = resolve_instance(Some("   "));
+
+        assert!(!resolved.is_empty());
+        assert_ne!(resolved.trim(), "");
+    }
+
+    #[test]
+    fn an_absent_instance_name_resolves_to_something_usable() {
+        let resolved = resolve_instance(None);
+
+        assert!(!resolved.is_empty());
+        assert!(!resolved.contains('/'));
+    }
+
+    /// A name carrying wildcards would silently widen or break the subscription
+    /// it is spliced into, so those characters cannot survive.
+    #[test]
+    fn topic_wildcards_and_separators_are_replaced() {
+        assert_eq!(resolve_instance(Some("a/b+c#d")), "a-b-c-d");
+        assert_eq!(resolve_instance(Some("my desk")), "my-desk");
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed_rather_than_replaced() {
+        assert_eq!(resolve_instance(Some("  desk  ")), "desk");
     }
 
     #[test]

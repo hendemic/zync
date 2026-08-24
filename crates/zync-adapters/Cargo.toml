@@ -8,6 +8,7 @@ license.workspace = true
 zync-core.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
+hostname.workspace = true
 rumqttc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

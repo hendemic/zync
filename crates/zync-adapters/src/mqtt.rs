@@ -31,12 +31,23 @@ pub const SHUTDOWN: &str = "shutdown";
 /// Retained, so a controller learns whether an instance is running without
 /// waiting for it to say anything. Also the last will, so an instance that dies
 /// without warning stops claiming to be online.
-pub fn status_topic(name: &str) -> String {
-    format!("zync/{name}/status")
+pub fn status_topic(instance: &str) -> String {
+    format!("zync/{instance}/status")
 }
 
-pub fn control_topic(name: &str) -> String {
-    format!("zync/{name}/control")
+pub fn control_topic(instance: &str) -> String {
+    format!("zync/{instance}/control")
+}
+
+/// The broker-facing identity of a running instance.
+///
+/// Built from the instance name rather than `mqtt.name` alone because a client id
+/// must be unique per broker: MQTT 3.1.1 §3.1.4 has the broker disconnect the
+/// older client on a collision, and since the event loop reconnects, two machines
+/// sharing an id would disconnect each other indefinitely. `mqtt.name` is kept as
+/// the prefix so the connection is still recognisable in broker logs.
+fn client_id(config: &MqttConfig, instance: &str) -> String {
+    format!("{}-{}", config.name, instance)
 }
 
 /// A message delivered to one subscriber.
@@ -62,9 +73,12 @@ impl MqttBus {
     ///
     /// Draining the event loop is not optional: it is what makes any progress at
     /// all happen, including outbound publishes.
-    pub fn connect(config: &MqttConfig) -> Result<Self> {
-        let status_topic = status_topic(&config.name);
-        let mut options = MqttOptions::new(&config.name, &config.broker, config.port);
+    pub fn connect(config: &MqttConfig, instance: &str) -> Result<Self> {
+        let status_topic = status_topic(instance);
+        let id = client_id(config, instance);
+        debug!(client_id = %id, instance, "connecting to the MQTT broker");
+
+        let mut options = MqttOptions::new(&id, &config.broker, config.port);
         options.set_keep_alive(KEEP_ALIVE);
         options.set_last_will(LastWill::new(
             &status_topic,
@@ -175,10 +189,10 @@ impl MqttBus {
 /// Home Assistant switch will not either: both are just publishes to this topic.
 pub fn spawn_control_listener(
     bus: &MqttBus,
-    name: &str,
+    instance: &str,
     commands: Sender<ControlCommand>,
 ) -> Result<()> {
-    let topic = control_topic(name);
+    let topic = control_topic(instance);
     let messages = bus.subscribe(&topic)?;
 
     thread::Builder::new()
@@ -207,11 +221,11 @@ pub fn spawn_control_listener(
 ///
 /// Checks the retained status topic first so that "nothing is running" is
 /// reported as such rather than as a publish that silently went nowhere.
-pub fn request_shutdown(config: &MqttConfig) -> Result<()> {
+pub fn request_shutdown(config: &MqttConfig, instance: &str) -> Result<()> {
     // A distinct client id matters: reusing the running instance's id would make
     // the broker disconnect it, stopping the sync without restoring the lights.
-    let client_id = format!("{}-ctl", config.name);
-    let mut options = MqttOptions::new(client_id, &config.broker, config.port);
+    let id = format!("{}-ctl", client_id(config, instance));
+    let mut options = MqttOptions::new(id, &config.broker, config.port);
     options.set_keep_alive(KEEP_ALIVE);
 
     if let (Some(user), Some(password)) = (&config.user, &config.password) {
@@ -219,21 +233,23 @@ pub fn request_shutdown(config: &MqttConfig) -> Result<()> {
     }
 
     let (client, mut connection) = Client::new(options, REQUEST_CAPACITY);
-    let status = status_topic(&config.name);
+    let status = status_topic(instance);
     client
         .subscribe(&status, QoS::AtMostOnce)
         .context("Failed to subscribe to the status topic")?;
 
     let deadline = Instant::now() + CONTROL_TIMEOUT;
     if !await_online(&mut connection, &status, deadline)? {
+        // Naming the instance matters: the usual cause is a name mismatch between
+        // this config and the one the running process started with.
         bail!(
-            "No running instance found on {}. Nothing to stop.",
+            "No running instance named '{instance}' found on {}. Nothing to stop.",
             config.broker
         );
     }
 
     client
-        .publish(control_topic(&config.name), QoS::AtLeastOnce, false, SHUTDOWN)
+        .publish(control_topic(instance), QoS::AtLeastOnce, false, SHUTDOWN)
         .context("Failed to publish the shutdown request")?;
 
     await_ack(&mut connection, deadline)
@@ -361,5 +377,44 @@ mod tests {
     fn control_and_status_topics_are_namespaced_per_instance() {
         assert_eq!(control_topic("desk"), "zync/desk/control");
         assert_eq!(status_topic("desk"), "zync/desk/status");
+        assert_ne!(control_topic("desk"), control_topic("laptop"));
+    }
+
+    fn broker(name: &str) -> MqttConfig {
+        MqttConfig {
+            name: name.into(),
+            broker: "localhost".into(),
+            port: 1883,
+            user: None,
+            password: None,
+        }
+    }
+
+    /// The collision that matters: one config copied to two machines must still
+    /// produce two client ids, or the broker disconnects each in turn forever.
+    #[test]
+    fn one_config_on_two_machines_yields_distinct_client_ids() {
+        let config = broker("my-connection");
+
+        assert_ne!(
+            client_id(&config, "desk"),
+            client_id(&config, "laptop"),
+            "the instance name must reach the client id"
+        );
+    }
+
+    /// `zync stop` connects alongside the instance it is stopping, so its id has
+    /// to differ from that instance's too.
+    #[test]
+    fn the_control_client_does_not_collide_with_the_instance() {
+        let config = broker("my-connection");
+        let instance = client_id(&config, "desk");
+
+        assert_ne!(format!("{instance}-ctl"), instance);
+    }
+
+    #[test]
+    fn the_configured_name_stays_visible_in_the_client_id() {
+        assert!(client_id(&broker("my-connection"), "desk").starts_with("my-connection"));
     }
 }

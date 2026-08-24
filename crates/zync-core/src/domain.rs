@@ -440,6 +440,13 @@ pub struct Config {
     /// What to leave the lights doing when the session stops.
     #[serde(default)]
     pub on_stop: StopPolicy,
+    /// Names this installation on the broker, keeping its client id and control
+    /// topics distinct from another machine's.
+    ///
+    /// Left unset here on purpose: resolving the default means asking the system
+    /// for its hostname, which is an adapter's job, not the model's.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 impl Config {
@@ -701,6 +708,7 @@ mod tests {
                 max_commands_per_sec: 6.0,
             },
             on_stop: StopPolicy::Restore,
+            instance: None,
         }
     }
 
