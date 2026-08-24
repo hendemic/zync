@@ -89,6 +89,21 @@ pub fn log_dir() -> Result<PathBuf> {
     Ok(state_dir()?.join("logs"))
 }
 
+/// Records the running service so `status` and `stop` can find it without a
+/// broker round-trip.
+pub fn pid_path() -> Result<PathBuf> {
+    Ok(state_dir()?.join("zync.pid"))
+}
+
+/// Where a detached service's stdout and stderr go: whatever escapes the logger,
+/// such as a panic.
+///
+/// Deliberately not named `zync.*`, because the rolling appender owns that
+/// prefix and `zync logs` picks the newest file matching it.
+pub fn stderr_path() -> Result<PathBuf> {
+    Ok(log_dir()?.join("stderr.log"))
+}
+
 /// Loads the configuration, creating a commented example on first run.
 ///
 /// Creating the example is a hard stop rather than a default: a generated config

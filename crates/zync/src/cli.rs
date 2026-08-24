@@ -1,10 +1,10 @@
 //! Command line surface.
 //!
 //! Each subcommand is a thin translation from arguments into a call on the
-//! adapters and the application layer. New commands — `config`, `regions`,
-//! `doctor` — are added here without the layers below needing to know.
+//! adapters and the application layer. `regions` and `config` are added here
+//! without the layers below needing to know.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,10 +13,16 @@ use zync_adapters::lights::Z2mSink;
 use zync_adapters::mqtt::{self, MqttBus};
 use zync_adapters::{config, open_frame_source};
 use zync_core::app::{ControlCommand, Supervisor, SyncLoop};
+use zync_core::domain::Config;
+
+use crate::service;
 
 /// Time allowed for queued publishes — the restore commands especially — to
 /// reach the broker before the process exits.
 const FLUSH_GRACE: Duration = Duration::from_millis(400);
+
+/// How long `stop` waits to see the service actually go away.
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Parser)]
 #[command(
@@ -31,24 +37,95 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Sync the lights to the screen. Runs in the foreground until stopped.
-    Start,
-    /// Ask a running instance to stop and hand the lights back.
+    /// Start syncing the lights, in the background.
+    Start {
+        /// Run in this terminal instead of detaching, logging as it goes.
+        #[arg(long, short)]
+        foreground: bool,
+    },
+    /// Stop syncing and hand the lights back.
     Stop,
+    /// Report whether zync is running.
+    Status,
+    /// Show what zync has been doing.
+    Logs {
+        /// Keep printing new output until interrupted.
+        #[arg(long, short)]
+        follow: bool,
+        /// How many existing lines to show first.
+        #[arg(long, short = 'n', default_value_t = 40)]
+        lines: usize,
+    },
+    /// The detached service process. Not for direct use.
+    #[command(name = "__daemon", hide = true)]
+    Daemon,
+}
+
+/// Which log destinations a command wants.
+///
+/// The parent of a detached service must not write to the same file as the
+/// service itself, so only one process at a time logs to disk.
+pub enum Logging {
+    /// The service: the log file only, since it has no terminal.
+    Service,
+    /// A foreground run: the log file and the terminal.
+    Foreground,
+    /// A short-lived command: the terminal only.
+    Client,
+    /// Output belongs to the command itself; logs would only get in the way.
+    Silent,
 }
 
 impl Command {
+    pub fn logging(&self) -> Logging {
+        match self {
+            Command::Daemon => Logging::Service,
+            Command::Start { foreground: true } => Logging::Foreground,
+            Command::Logs { .. } => Logging::Silent,
+            _ => Logging::Client,
+        }
+    }
+
     pub fn run(self) -> Result<()> {
         match self {
-            Command::Start => start(),
+            Command::Start { foreground } => start(foreground),
+            Command::Daemon => run_session(config::load_or_init()?),
             Command::Stop => stop(),
+            Command::Status => status(),
+            Command::Logs { follow, lines } => service::tail(lines, follow),
         }
     }
 }
 
-/// Wires the adapters onto the application layer and runs until told to stop.
-fn start() -> Result<()> {
+fn start(foreground: bool) -> Result<()> {
+    // Loading here rather than in the child means a broken config is reported to
+    // the person who typed the command, instead of only to a log file.
     let config = config::load_or_init()?;
+
+    if foreground {
+        return run_session(config);
+    }
+
+    if let Some(pid) = service::running_pid() {
+        bail!("zync is already running (pid {pid}). Stop it first with `zync stop`.");
+    }
+
+    let pid = service::spawn_detached()?;
+    let instance = config::resolve_instance(config.instance.as_deref());
+
+    println!("zync is running in the background (pid {pid}, instance {instance}).");
+    println!("  zync logs -f    follow what it is doing");
+    println!("  zync stop       stop it and fade the lights back");
+
+    Ok(())
+}
+
+/// Wires the adapters onto the application layer and runs until told to stop.
+fn run_session(config: Config) -> Result<()> {
+    // Held for the whole session, and removed on the way out, so `status` and
+    // `stop` can find this process.
+    let _pid_file = service::PidFile::acquire()?;
+
     let instance = config::resolve_instance(config.instance.as_deref());
     info!(instance, "starting");
 
@@ -92,7 +169,80 @@ fn stop() -> Result<()> {
     let instance = config::resolve_instance(config.instance.as_deref());
 
     mqtt::request_shutdown(&config.mqtt, &instance)?;
-    println!("Stopping zync ({instance}).");
+
+    if service::await_exit(STOP_TIMEOUT) {
+        println!("Stopped zync ({instance}). The lights are fading back.");
+    } else {
+        println!(
+            "Asked zync ({instance}) to stop, but it is still running. See `zync logs`."
+        );
+    }
 
     Ok(())
+}
+
+fn status() -> Result<()> {
+    let config_path = config::config_path()?;
+    let configured = config::load_from(&config_path)
+        .ok()
+        .and_then(|config| config.instance);
+    let instance = config::resolve_instance(configured.as_deref());
+
+    match service::running_pid() {
+        Some(pid) => println!("zync is running (pid {pid})."),
+        None => println!("zync is not running."),
+    }
+
+    let log = service::current_log()
+        .or_else(|| config::log_dir().ok())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+
+    println!("  instance  {instance}");
+    println!("  config    {}", config_path.display());
+    println!("  logs      {log}");
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// clap needs the name as a literal, so it cannot share the constant that
+    /// `spawn_detached` passes. This is the guard against them drifting apart.
+    #[test]
+    fn the_hidden_daemon_command_matches_what_is_spawned() {
+        assert!(
+            Cli::command()
+                .get_subcommands()
+                .any(|sub| sub.get_name() == service::DAEMON_COMMAND),
+            "no subcommand named {}",
+            service::DAEMON_COMMAND
+        );
+    }
+
+    #[test]
+    fn start_detaches_unless_foreground_is_asked_for() {
+        let background = Cli::try_parse_from(["zync", "start"]).unwrap();
+        let foreground = Cli::try_parse_from(["zync", "start", "--foreground"]).unwrap();
+
+        assert!(matches!(background.command, Command::Start { foreground: false }));
+        assert!(matches!(foreground.command, Command::Start { foreground: true }));
+    }
+
+    /// The service writes the log file; a client process must not also open it.
+    #[test]
+    fn only_the_service_and_a_foreground_run_write_the_log_file() {
+        let writes_file = |command: Command| {
+            matches!(command.logging(), Logging::Service | Logging::Foreground)
+        };
+
+        assert!(writes_file(Command::Daemon));
+        assert!(writes_file(Command::Start { foreground: true }));
+        assert!(!writes_file(Command::Start { foreground: false }));
+        assert!(!writes_file(Command::Stop));
+        assert!(!writes_file(Command::Status));
+    }
 }

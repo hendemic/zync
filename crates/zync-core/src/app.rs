@@ -429,9 +429,12 @@ impl SyncLoop {
             return;
         }
 
+        // Computed and rounded in f64 so the logged value reads as 12.05 rather
+        // than the full binary expansion of an f32.
         let total: u64 = self.interval_samples.iter().sum();
-        let average = total as f32 / self.interval_samples.len().max(1) as f32;
-        info!(fps = 1000.0 / average, "capture rate");
+        let average = total as f64 / self.interval_samples.len().max(1) as f64;
+        let fps = (100_000.0 / average).round() / 100.0;
+        info!(fps, "capture rate");
 
         let captured = self.frames.frames_captured();
         for zone in &self.zones {

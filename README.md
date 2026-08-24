@@ -23,13 +23,19 @@ Note: Fullscreen apps (games, fullscreen video) are captured on Gnome Wayland be
 Build with `cargo build --release`; the binary is `zync`.
 
 ```
-zync start    # sync the lights to the screen, in the foreground
-zync stop     # ask a running instance to stop and hand the lights back
+zync start           # start syncing in the background, and give the terminal back
+zync status          # is it running?
+zync logs -f         # follow what it is doing
+zync stop            # stop syncing and fade the lights back
+
+zync start -f        # run in this terminal instead, logging as it goes
 ```
 
-On first run `zync start` creates a commented config at `~/.config/zync/config.yaml` and exits so you can fill in your broker and lights.
+`zync start` detaches into its own session, so it keeps running after you close the shell. Use `-f`/`--foreground` when you want to watch it directly.
 
-Stopping — with `zync stop`, with Ctrl-C, or by the process dying — returns the lights to whatever they were showing before syncing started. `on_stop` in the config chooses that behaviour.
+On first run `zync start` creates a commented config at `~/.config/zync/config.yaml` and exits so you can fill in your broker and lights. Config problems are reported by `zync start` itself rather than only landing in a log.
+
+Stopping — with `zync stop`, with Ctrl-C on a foreground run, or with `kill` on the service — fades the lights back over five seconds to whatever they were showing before syncing started. `on_stop` in the config chooses that behaviour.
 
 `zync stop` reaches the running instance over your MQTT broker, so it works from another terminal, another shell, or a script. Two topics are involved, both namespaced by the instance name:
 
@@ -49,7 +55,9 @@ Set `instance:` in the config only if you want a name other than the hostname.
 |---|---|
 | `~/.config/zync/config.yaml` | you |
 | `~/.local/state/zync/state.json` | the app — currently the screencast portal's restore token |
-| `~/.local/state/zync/logs/zync.log.<date>` | the app — daily rotation, seven files kept |
+| `~/.local/state/zync/zync.pid` | the app — the running service, so `status` and `stop` can find it |
+| `~/.local/state/zync/logs/zync.<date>.log` | the app — daily rotation, seven files kept. This is what `zync logs` reads |
+| `~/.local/state/zync/logs/stderr.log` | the app — anything that escapes the logger, such as a panic |
 
 #### Sample yaml file
 ```yaml
@@ -120,7 +128,7 @@ performance:
 ## Current features
 - Connects to MQTT broker and sends messages to Z2M to control lights
 - Support for X11 Linux and Wayland
-- `zync start` / `zync stop`, with the stop reaching a running instance over MQTT
+- Runs as a background service: `zync start`, `zync status`, `zync logs`, `zync stop`. Stop reaches the running instance over MQTT, so it works from any terminal
 - Lights are returned to their previous state on stop. Each light's state is read back from Z2M at startup; lights that don't report one (groups, usually) fall back to a configured `fallback_state`
 - Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps.
 - Adaptive framerate driven by the light network itself. Zigbee2MQTT's log stream is monitored for delivery failures, and the send rate backs off whenever the mesh reports congestion. `percent_thread_work` remains as a secondary CPU guard (e.g. 10fps = 100ms thread time; 0.25 means 25ms of capture time will throttle the framerate).
@@ -149,11 +157,14 @@ zync            the binary: logging, CLI
 ### Other ideas in consideration
 - Hue Gradient and other "segment" lights. Requires reworking the zone-to-light mapping into a many-to-one relationship of zones to a light's segments.
 - `zync config` and `zync doctor` subcommands.
+- A systemd user unit, so syncing can start with the session.
 
 ## Troubleshooting
 
 ### Checking what the capture is doing
-Logs go to stderr and to `~/.local/state/zync/logs/`. Set `RUST_LOG=debug` for diagnostics (`ZYNC_DEBUG=1` still works as a shorthand).
+`zync logs -f` follows the current log file; `zync logs -n 200` shows more history. Set `RUST_LOG=debug` before starting for diagnostics (`ZYNC_DEBUG=1` still works as a shorthand).
+
+`RUST_LOG` also silences noise: the default filter includes `zbus=error`, because zbus warns about property caching for every portal request whose object has already gone away. Overriding `RUST_LOG` drops that filter, so add it back if the warnings bury what you are looking for.
 
 At startup a line reports the capture source resolution and the capture mode: DMA-BUF (frames stay on the GPU and are scaled there) or shared memory (the fallback path). Then diagnostics are logged periodically:
 - `frames` — frames the compositor actually delivered during the reporting interval. `0` while a fullscreen app is open means the compositor stopped feeding the stream.

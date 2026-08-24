@@ -3781,6 +3781,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "dirs",
+ "libc",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
