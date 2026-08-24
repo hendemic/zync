@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -307,13 +307,64 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
         .max()
 }
 
+/// Whether output should carry colour: only when stdout is an actual terminal,
+/// and not when the viewer opted out via the https://no-color.org convention.
+/// Piping to `grep` or a file must see plain text, or every match embeds escape
+/// codes.
+fn color_enabled() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// SGR codes keyed by exactly the words the formatter writes. A token that does
+/// not match one of these exactly — there is no level, or the line is shaped
+/// unexpectedly — is left uncoloured rather than guessed at.
+fn level_color(token: &str) -> Option<&'static str> {
+    match token {
+        "TRACE" => Some("2"),    // dim
+        "DEBUG" => Some("36"),   // cyan
+        "INFO" => Some("32"),    // green
+        "WARN" => Some("33"),    // yellow
+        "ERROR" => Some("31;1"), // bold red
+        _ => None,
+    }
+}
+
+/// Writes one line, colouring only its level token so timestamps, targets, and
+/// messages read exactly as they do in the file.
+///
+/// Locates the token with a plain substring search rather than tracking the
+/// byte offset through `split_whitespace`: levels are distinct all-caps words
+/// that do not otherwise appear in a timestamp or a lowercase message, so the
+/// first match is the level, and a line where that assumption fails just prints
+/// uncoloured instead of miscolouring something.
+fn write_line(out: &mut impl Write, line: &str, color: bool) -> Result<()> {
+    let token = color
+        .then(|| line.split_whitespace().nth(1))
+        .flatten()
+        .and_then(|token| level_color(token).map(|code| (token, code)))
+        .and_then(|(token, code)| line.find(token).map(|at| (at, token, code)));
+
+    match token {
+        Some((at, token, code)) => writeln!(
+            out,
+            "{}[{code}m{token}[0m{}",
+            &line[..at],
+            &line[at + token.len()..]
+        )?,
+        None => writeln!(out, "{line}")?,
+    }
+
+    Ok(())
+}
+
 fn print_history(file: &mut File, view: &LogView, out: &mut impl Write) -> Result<u64> {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .context("Failed to read the log file")?;
 
+    let color = color_enabled();
     for line in selected(&contents, view) {
-        writeln!(out, "{line}")?;
+        write_line(out, line, color)?;
     }
 
     Ok(contents.len() as u64)
@@ -338,8 +389,9 @@ fn print_appended(
     file.read_to_string(&mut appended)
         .context("Failed to read the log file")?;
 
+    let color = color_enabled();
     for line in appended.lines().filter(|line| included(line, level)) {
-        writeln!(out, "{line}")?;
+        write_line(out, line, color)?;
     }
 
     Ok(start + appended.len() as u64)
@@ -458,6 +510,51 @@ mod tests {
         let contents = "thread 'main' panicked at src/lib.rs:1:1";
 
         assert_eq!(selected(contents, &view(LogLevel::Error, false, 10)).len(), 1);
+    }
+
+    #[test]
+    fn a_recognised_level_is_wrapped_in_its_colour_code() {
+        let line = "2026-08-24T06:00:00.0Z ERROR zync::cli: something broke";
+        let mut out = Vec::new();
+
+        write_line(&mut out, line, true).unwrap();
+
+        let written = String::from_utf8(out).unwrap();
+        assert_eq!(written, "2026-08-24T06:00:00.0Z [31;1mERROR[0m zync::cli: something broke
+");
+    }
+
+    #[test]
+    fn color_disabled_writes_the_line_unchanged() {
+        let line = "2026-08-24T06:00:00.0Z ERROR zync::cli: something broke";
+        let mut out = Vec::new();
+
+        write_line(&mut out, line, false).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{line}\n"));
+    }
+
+    /// A line with no readable level — a panic, a wrapped line — must still be
+    /// printed, just without colour, rather than dropped or mangled.
+    #[test]
+    fn a_line_without_a_recognised_level_is_left_uncoloured() {
+        let line = "thread 'main' panicked at src/lib.rs:1:1";
+        let mut out = Vec::new();
+
+        write_line(&mut out, line, true).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{line}\n"));
+    }
+
+    #[test]
+    fn every_written_level_has_a_distinct_colour() {
+        let codes: std::collections::HashSet<_> =
+            ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
+                .iter()
+                .map(|level| level_color(level).unwrap())
+                .collect();
+
+        assert_eq!(codes.len(), 5);
     }
 
     /// Regression: the appender writes `zync.<date>.log`, and an earlier filter
