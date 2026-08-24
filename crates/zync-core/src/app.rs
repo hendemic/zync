@@ -434,7 +434,9 @@ impl SyncLoop {
         let total: u64 = self.interval_samples.iter().sum();
         let average = total as f64 / self.interval_samples.len().max(1) as f64;
         let fps = (100_000.0 / average).round() / 100.0;
-        info!(fps, "capture rate");
+        // Debug, not info: once every reporting interval forever, this would
+        // otherwise be almost the entire log and drown the events that matter.
+        debug!(fps, "capture rate");
 
         let captured = self.frames.frames_captured();
         for zone in &self.zones {

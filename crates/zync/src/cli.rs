@@ -52,7 +52,16 @@ pub enum Command {
         /// Keep printing new output until interrupted.
         #[arg(long, short)]
         follow: bool,
-        /// How many existing lines to show first.
+        /// Show only the most recent run, in full.
+        #[arg(long, short)]
+        session: bool,
+        /// Include the per-frame detail the log already holds.
+        #[arg(long, short, conflicts_with = "level")]
+        verbose: bool,
+        /// Lowest level to show. Defaults to events only.
+        #[arg(long, value_enum, default_value_t = service::LogLevel::Info)]
+        level: service::LogLevel,
+        /// How many existing lines to show first. Ignored with --session.
         #[arg(long, short = 'n', default_value_t = 40)]
         lines: usize,
     },
@@ -92,7 +101,14 @@ impl Command {
             Command::Daemon => run_session(config::load_or_init()?),
             Command::Stop => stop(),
             Command::Status => status(),
-            Command::Logs { follow, lines } => service::tail(lines, follow),
+            Command::Logs { follow, session, verbose, level, lines } => {
+                service::tail(service::LogView {
+                    level: if verbose { service::LogLevel::Debug } else { level },
+                    session,
+                    lines,
+                    follow,
+                })
+            }
         }
     }
 }
@@ -115,6 +131,7 @@ fn start(foreground: bool) -> Result<()> {
 
     println!("zync is running in the background (pid {pid}, instance {instance}).");
     println!("  zync logs -f    follow what it is doing");
+    println!("  zync logs -sv   everything from this run, in detail");
     println!("  zync stop       stop it and fade the lights back");
 
     Ok(())
@@ -127,7 +144,7 @@ fn run_session(config: Config) -> Result<()> {
     let _pid_file = service::PidFile::acquire()?;
 
     let instance = config::resolve_instance(config.instance.as_deref());
-    info!(instance, "starting");
+    info!(instance, "{}", service::SESSION_MARKER);
 
     let bus = Arc::new(
         MqttBus::connect(&config.mqtt, &instance).context("Could not connect to MQTT")?,
@@ -244,5 +261,12 @@ mod tests {
         assert!(!writes_file(Command::Start { foreground: false }));
         assert!(!writes_file(Command::Stop));
         assert!(!writes_file(Command::Status));
+        assert!(!writes_file(Command::Logs {
+            follow: false,
+            session: false,
+            verbose: false,
+            level: service::LogLevel::Info,
+            lines: 40,
+        }));
     }
 }

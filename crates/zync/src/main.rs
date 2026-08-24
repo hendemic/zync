@@ -4,9 +4,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 mod cli;
 mod service;
@@ -17,10 +18,17 @@ use cli::Logging;
 /// ago, short enough that nobody has to think about disk usage.
 const LOG_FILES_KEPT: usize = 7;
 
-/// zbus logs a warning for every portal request whose object is already gone by
-/// the time it tries to cache its properties. Harmless, and several lines of it
-/// on every start, so it is quietened rather than left to bury the real output.
-const NOISE: &str = "zbus=error";
+/// What reaches any layer at all.
+///
+/// Our own crates are recorded at debug so `zync logs -v` can answer questions
+/// about a run that has already finished — verbosity becomes a reading decision
+/// rather than something you must have predicted before starting.
+///
+/// Third-party crates stay at info: rumqttc and gstreamer at debug would bury
+/// everything. zbus is quieter still, because it warns about property caching for
+/// every portal request whose object has already gone away.
+const DEFAULT_FILTER: &str =
+    "info,zync=debug,zync_core=debug,zync_adapters=debug,zbus=error";
 
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();
@@ -47,6 +55,9 @@ fn init_logging(mode: Logging) -> Result<Option<WorkerGuard>> {
             .with_writer(std::io::stderr)
             .with_target(false)
             .compact()
+            // The terminal shows events; the file keeps the detail. A foreground
+            // run that wants the detail on screen asks for it with ZYNC_DEBUG.
+            .with_filter(console_level())
     });
 
     // A missing log directory must not stop the app from running, so file
@@ -80,15 +91,16 @@ fn init_logging(mode: Logging) -> Result<Option<WorkerGuard>> {
 }
 
 fn filter() -> EnvFilter {
-    // ZYNC_DEBUG predates this and is still documented, so it keeps working as a
-    // shorthand for the debug level.
-    let level = if std::env::var("ZYNC_DEBUG").is_ok_and(|value| value != "0") {
-        "debug"
-    } else {
-        "info"
-    };
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER))
+}
 
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(format!("{level},{NOISE}")))
+/// ZYNC_DEBUG predates all of this and is still documented, so it keeps working —
+/// now as "show me the detail as it happens" rather than "record it".
+fn console_level() -> LevelFilter {
+    match std::env::var("ZYNC_DEBUG").is_ok_and(|value| value != "0") {
+        true => LevelFilter::DEBUG,
+        false => LevelFilter::INFO,
+    }
 }
 
 fn open_log_file() -> Result<RollingFileAppender> {

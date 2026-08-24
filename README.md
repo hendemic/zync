@@ -162,15 +162,28 @@ zync            the binary: logging, CLI
 ## Troubleshooting
 
 ### Checking what the capture is doing
-`zync logs -f` follows the current log file; `zync logs -n 200` shows more history. Set `RUST_LOG=debug` before starting for diagnostics (`ZYNC_DEBUG=1` still works as a shorthand).
 
-`RUST_LOG` also silences noise: the default filter includes `zbus=error`, because zbus warns about property caching for every portal request whose object has already gone away. Overriding `RUST_LOG` drops that filter, so add it back if the warnings bury what you are looking for.
+```
+zync logs                 # recent events
+zync logs -f              # follow
+zync logs -s              # just the most recent run, in full
+zync logs -v              # include per-frame detail
+zync logs --level warn    # problems only
+zync logs -n 200          # more history
+```
 
-At startup a line reports the capture source resolution and the capture mode: DMA-BUF (frames stay on the GPU and are scaled there) or shared memory (the fallback path). Then diagnostics are logged periodically:
+The log file always records zync's own detail, so `-v` works on a run that has already finished — you don't have to have predicted before starting that you'd want it. Third-party crates are recorded at info, and zbus at error, because rumqttc and gstreamer at debug would bury everything, and zbus warns about property caching for every portal request whose object has already gone away.
+
+`--level` and `-v` filter what is printed. What gets *recorded* is `RUST_LOG`, read when the service starts; overriding it replaces the defaults above, so keep `zbus=error` in it. `ZYNC_DEBUG=1` still works, and now means "show the detail on the terminal too" for a foreground run.
+
+Per-frame diagnostics live at debug:
 - `frames` — frames the compositor actually delivered during the reporting interval. `0` while a fullscreen app is open means the compositor stopped feeding the stream.
 - `sent` — light commands sent.
 - `deferred` — updates held back by the command budget.
+- `capture rate` — the frame rate, once per `fps_reporting` seconds.
 - one line per zone with its last sampled colour, current pacing, and failures charged to it.
+
+At startup an event line reports the capture source resolution and the capture mode: DMA-BUF (frames stay on the GPU and are scaled there) or shared memory (the fallback path).
 
 ### Lights freeze when a game or video goes fullscreen (Gnome Wayland)
 When Mutter hands a fullscreen window straight to the display (direct scanout), the monitor screencast stream stops delivering frames entirely unless the consumer negotiated DMA-BUF buffers. Shared-memory streams get zero frames until the app leaves fullscreen. This app negotiates DMA-BUF and scales frames on the GPU, so it handles that automatically — and it also avoids a full-resolution GPU to CPU readback that gnome-shell was doing for every frame, which was a big chunk of the CPU cost on Wayland.

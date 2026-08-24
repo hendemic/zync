@@ -17,6 +17,10 @@ use zync_adapters::config;
 /// Hidden subcommand the detached child is launched with.
 pub const DAEMON_COMMAND: &str = "__daemon";
 
+/// Logged once when a session starts, and searched for by `logs --session`.
+/// Both sides read it from here so rewording the message cannot break the flag.
+pub const SESSION_MARKER: &str = "session starting";
+
 /// How often `logs --follow` looks for new output.
 const FOLLOW_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -160,11 +164,86 @@ pub fn await_exit(timeout: Duration) -> bool {
     running_pid().is_none()
 }
 
+/// A threshold for what `logs` prints, applied to what the file already holds.
+///
+/// The file records our own crates at debug, so this is a read-time choice: a
+/// problem can be examined in detail after the fact without restarting anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+#[clap(rename_all = "lower")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    /// Events: started, connected, stopped, lights restored, problems.
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    fn parse(token: &str) -> Option<Self> {
+        match token {
+            "TRACE" => Some(LogLevel::Trace),
+            "DEBUG" => Some(LogLevel::Debug),
+            "INFO" => Some(LogLevel::Info),
+            "WARN" => Some(LogLevel::Warn),
+            "ERROR" => Some(LogLevel::Error),
+            _ => None,
+        }
+    }
+}
+
+/// How `logs` was asked to narrow things down.
+pub struct LogView {
+    pub level: LogLevel,
+    /// Show only what the most recent session logged.
+    pub session: bool,
+    /// How many lines of history, ignored when `session` is set.
+    pub lines: usize,
+    pub follow: bool,
+}
+
+/// The formatter writes `<timestamp> <LEVEL> <target>: <message>`, so the level
+/// is the second token. Lines it cannot be read from are kept rather than
+/// hidden — a line of unexpected shape is more likely to matter, not less.
+fn included(line: &str, threshold: LogLevel) -> bool {
+    line.split_whitespace()
+        .nth(1)
+        .and_then(LogLevel::parse)
+        .is_none_or(|level| level >= threshold)
+}
+
+/// Narrows a file's lines to what was asked for.
+fn selected<'a>(contents: &'a str, view: &LogView) -> Vec<&'a str> {
+    let lines: Vec<&str> = contents.lines().collect();
+
+    // Scoping to a session comes first: the marker is logged at info, so a
+    // debug view of one session still starts in the right place.
+    let start = match view.session {
+        true => lines
+            .iter()
+            .rposition(|line| line.contains(SESSION_MARKER))
+            .unwrap_or(0),
+        false => 0,
+    };
+
+    let kept: Vec<&str> = lines[start..]
+        .iter()
+        .copied()
+        .filter(|line| included(line, view.level))
+        .collect();
+
+    // A session is shown whole; otherwise the tail is what was asked for.
+    match view.session {
+        true => kept,
+        false => kept[kept.len().saturating_sub(view.lines)..].to_vec(),
+    }
+}
+
 /// Prints the tail of the current log file, optionally following it.
 ///
 /// Rotation is handled by re-resolving the newest file as it goes, so a follow
 /// running across midnight keeps working.
-pub fn tail(lines: usize, follow: bool) -> Result<()> {
+pub fn tail(view: LogView) -> Result<()> {
     let dir = config::log_dir()?;
     let mut path = newest_log(&dir)
         .ok_or_else(|| anyhow!("No log files yet in {}. Has zync run?", dir.display()))?;
@@ -173,10 +252,10 @@ pub fn tail(lines: usize, follow: bool) -> Result<()> {
     let mut out = BufWriter::new(stdout.lock());
 
     let mut file = File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
-    let mut offset = print_tail(&mut file, lines, &mut out)?;
+    let mut offset = print_history(&mut file, &view, &mut out)?;
     out.flush()?;
 
-    if !follow {
+    if !view.follow {
         return Ok(());
     }
 
@@ -194,7 +273,7 @@ pub fn tail(lines: usize, follow: bool) -> Result<()> {
             offset = 0;
         }
 
-        offset = print_appended(&mut file, offset, &mut out)?;
+        offset = print_appended(&mut file, offset, view.level, &mut out)?;
         out.flush()?;
     }
 }
@@ -222,20 +301,24 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
         .max()
 }
 
-fn print_tail(file: &mut File, lines: usize, out: &mut impl Write) -> Result<u64> {
+fn print_history(file: &mut File, view: &LogView, out: &mut impl Write) -> Result<u64> {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .context("Failed to read the log file")?;
 
-    let all: Vec<&str> = contents.lines().collect();
-    for line in all.iter().skip(all.len().saturating_sub(lines)) {
+    for line in selected(&contents, view) {
         writeln!(out, "{line}")?;
     }
 
     Ok(contents.len() as u64)
 }
 
-fn print_appended(file: &mut File, offset: u64, out: &mut impl Write) -> Result<u64> {
+fn print_appended(
+    file: &mut File,
+    offset: u64,
+    level: LogLevel,
+    out: &mut impl Write,
+) -> Result<u64> {
     let length = file.metadata().context("Failed to stat the log file")?.len();
 
     // A shorter file means it was rotated or truncated underneath us.
@@ -248,7 +331,10 @@ fn print_appended(file: &mut File, offset: u64, out: &mut impl Write) -> Result<
     let mut appended = String::new();
     file.read_to_string(&mut appended)
         .context("Failed to read the log file")?;
-    write!(out, "{appended}")?;
+
+    for line in appended.lines().filter(|line| included(line, level)) {
+        writeln!(out, "{line}")?;
+    }
 
     Ok(start + appended.len() as u64)
 }
@@ -276,6 +362,81 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn view(level: LogLevel, session: bool, lines: usize) -> LogView {
+        LogView { level, session, lines, follow: false }
+    }
+
+    const SAMPLE: &str = "\
+2026-08-24T06:00:00.0Z  INFO zync::cli: session starting instance=\"a\"
+2026-08-24T06:00:01.0Z DEBUG zync_core::app: capture rate fps=12.05
+2026-08-24T06:00:02.0Z  WARN zync_adapters::mqtt: something odd
+2026-08-24T06:10:00.0Z  INFO zync::cli: session starting instance=\"b\"
+2026-08-24T06:10:01.0Z DEBUG zync_core::app: capture rate fps=11.9
+2026-08-24T06:10:02.0Z  INFO zync_core::app: session stopped";
+
+    #[test]
+    fn the_default_view_hides_debug_detail() {
+        let shown = selected(SAMPLE, &view(LogLevel::Info, false, 100));
+
+        assert_eq!(shown.len(), 4, "two debug lines should be dropped");
+        assert!(shown.iter().all(|line| !line.contains("capture rate")));
+    }
+
+    #[test]
+    fn a_debug_view_shows_everything_already_recorded() {
+        assert_eq!(selected(SAMPLE, &view(LogLevel::Debug, false, 100)).len(), 6);
+    }
+
+    #[test]
+    fn a_warn_view_keeps_only_problems() {
+        let shown = selected(SAMPLE, &view(LogLevel::Warn, false, 100));
+
+        assert_eq!(shown, vec!["2026-08-24T06:00:02.0Z  WARN zync_adapters::mqtt: something odd"]);
+    }
+
+    /// The point of --session: the previous run's lines must not appear.
+    #[test]
+    fn a_session_view_starts_at_the_last_session_marker() {
+        let shown = selected(SAMPLE, &view(LogLevel::Debug, true, 1));
+
+        assert_eq!(shown.len(), 3);
+        assert!(shown[0].contains("instance=\"b\""), "should start at the newer session");
+        assert!(!shown.iter().any(|line| line.contains("fps=12.05")));
+    }
+
+    /// A session is shown whole, so -n must not clip it.
+    #[test]
+    fn a_session_view_ignores_the_line_count() {
+        let all = selected(SAMPLE, &view(LogLevel::Debug, true, 1));
+
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn the_line_count_applies_to_the_tail_when_not_scoped() {
+        let shown = selected(SAMPLE, &view(LogLevel::Debug, false, 2));
+
+        assert_eq!(shown.len(), 2);
+        assert!(shown[1].contains("session stopped"), "should keep the newest lines");
+    }
+
+    /// A file with no marker yet must still show something rather than nothing.
+    #[test]
+    fn a_session_view_without_a_marker_falls_back_to_the_whole_file() {
+        let contents = "2026-08-24T06:00:00.0Z  INFO zync::cli: no marker here";
+
+        assert_eq!(selected(contents, &view(LogLevel::Info, true, 10)).len(), 1);
+    }
+
+    /// A panic or a wrapped line has no level token; hiding it would lose exactly
+    /// the output most worth seeing.
+    #[test]
+    fn lines_without_a_level_are_kept() {
+        let contents = "thread 'main' panicked at src/lib.rs:1:1";
+
+        assert_eq!(selected(contents, &view(LogLevel::Error, false, 10)).len(), 1);
     }
 
     /// Regression: the appender writes `zync.<date>.log`, and an earlier filter
