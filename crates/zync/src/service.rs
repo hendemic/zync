@@ -6,13 +6,15 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs::{self, File};
-use std::io::{BufWriter, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use tracing::debug;
 use zync_adapters::config;
+
+use crate::color;
 
 /// Hidden subcommand the detached child is launched with.
 pub const DAEMON_COMMAND: &str = "__daemon";
@@ -307,51 +309,52 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
         .max()
 }
 
-/// Whether output should carry colour: only when stdout is an actual terminal,
-/// and not when the viewer opted out via the https://no-color.org convention.
-/// Piping to `grep` or a file must see plain text, or every match embeds escape
-/// codes.
-fn color_enabled() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+/// The formatter's timestamp shape: RFC 3339 with a literal `Z`, e.g.
+/// `2026-08-24T06:42:01.006965Z`. Long enough, and specific enough, that the
+/// first word of a panic or another unrelated line will never satisfy it.
+fn looks_like_timestamp(token: &str) -> bool {
+    token.len() >= 20 && token.contains('T') && token.ends_with('Z')
 }
 
-/// SGR codes keyed by exactly the words the formatter writes. A token that does
-/// not match one of these exactly — there is no level, or the line is shaped
-/// unexpectedly — is left uncoloured rather than guessed at.
-fn level_color(token: &str) -> Option<&'static str> {
-    match token {
-        "TRACE" => Some("2"),    // dim
-        "DEBUG" => Some("36"),   // cyan
-        "INFO" => Some("32"),    // green
-        "WARN" => Some("33"),    // yellow
-        "ERROR" => Some("31;1"), // bold red
-        _ => None,
-    }
-}
-
-/// Writes one line, colouring only its level token so timestamps, targets, and
-/// messages read exactly as they do in the file.
+/// Writes one line: the timestamp dimmed and italicised, the level token
+/// coloured by severity, everything else — target, message — passed through
+/// untouched.
 ///
-/// Locates the token with a plain substring search rather than tracking the
-/// byte offset through `split_whitespace`: levels are distinct all-caps words
-/// that do not otherwise appear in a timestamp or a lowercase message, so the
-/// first match is the level, and a line where that assumption fails just prints
-/// uncoloured instead of miscolouring something.
+/// Both are found positionally rather than reconstructed from
+/// `split_whitespace`: the timestamp, if present, is the line's first token,
+/// and the level is the first token after it that matches a known severity. A
+/// line that is not shaped this way prints as-is rather than being guessed at.
 fn write_line(out: &mut impl Write, line: &str, color: bool) -> Result<()> {
-    let token = color
-        .then(|| line.split_whitespace().nth(1))
-        .flatten()
-        .and_then(|token| level_color(token).map(|code| (token, code)))
-        .and_then(|(token, code)| line.find(token).map(|at| (at, token, code)));
+    if !color {
+        writeln!(out, "{line}")?;
+        return Ok(());
+    }
 
-    match token {
+    let mut prefix = String::new();
+    let mut rest = line;
+
+    if let Some(ts_end) = line.find(char::is_whitespace) {
+        let candidate = &line[..ts_end];
+        if looks_like_timestamp(candidate) {
+            prefix = color::dim_italic(candidate, true);
+            rest = &line[ts_end..];
+        }
+    }
+
+    let level = rest
+        .split_whitespace()
+        .next()
+        .and_then(|token| color::level_code(token).map(|code| (token, code)))
+        .and_then(|(token, code)| rest.find(token).map(|at| (at, token, code)));
+
+    match level {
         Some((at, token, code)) => writeln!(
             out,
-            "{}[{code}m{token}[0m{}",
-            &line[..at],
-            &line[at + token.len()..]
+            "{prefix}{}\x1b[{code}m{token}\x1b[0m{}",
+            &rest[..at],
+            &rest[at + token.len()..]
         )?,
-        None => writeln!(out, "{line}")?,
+        None => writeln!(out, "{prefix}{rest}")?,
     }
 
     Ok(())
@@ -362,7 +365,7 @@ fn print_history(file: &mut File, view: &LogView, out: &mut impl Write) -> Resul
     file.read_to_string(&mut contents)
         .context("Failed to read the log file")?;
 
-    let color = color_enabled();
+    let color = color::enabled();
     for line in selected(&contents, view) {
         write_line(out, line, color)?;
     }
@@ -389,7 +392,7 @@ fn print_appended(
     file.read_to_string(&mut appended)
         .context("Failed to read the log file")?;
 
-    let color = color_enabled();
+    let color = color::enabled();
     for line in appended.lines().filter(|line| included(line, level)) {
         write_line(out, line, color)?;
     }
@@ -513,15 +516,16 @@ mod tests {
     }
 
     #[test]
-    fn a_recognised_level_is_wrapped_in_its_colour_code() {
+    fn the_timestamp_is_dimmed_and_the_level_coloured() {
         let line = "2026-08-24T06:00:00.0Z ERROR zync::cli: something broke";
         let mut out = Vec::new();
 
         write_line(&mut out, line, true).unwrap();
 
-        let written = String::from_utf8(out).unwrap();
-        assert_eq!(written, "2026-08-24T06:00:00.0Z [31;1mERROR[0m zync::cli: something broke
-");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[2;3m2026-08-24T06:00:00.0Z\x1b[0m \x1b[31;1mERROR\x1b[0m zync::cli: something broke\n"
+        );
     }
 
     #[test]
@@ -534,10 +538,11 @@ mod tests {
         assert_eq!(String::from_utf8(out).unwrap(), format!("{line}\n"));
     }
 
-    /// A line with no readable level — a panic, a wrapped line — must still be
-    /// printed, just without colour, rather than dropped or mangled.
+    /// A line with no readable level or timestamp — a panic, a wrapped line —
+    /// must still be printed, just without colour, rather than dropped or
+    /// mangled.
     #[test]
-    fn a_line_without_a_recognised_level_is_left_uncoloured() {
+    fn a_line_without_a_recognised_shape_is_left_uncoloured() {
         let line = "thread 'main' panicked at src/lib.rs:1:1";
         let mut out = Vec::new();
 
@@ -546,12 +551,20 @@ mod tests {
         assert_eq!(String::from_utf8(out).unwrap(), format!("{line}\n"));
     }
 
+    /// A short first word must not be mistaken for a timestamp — only genuine
+    /// RFC 3339 tokens qualify.
+    #[test]
+    fn a_short_first_word_is_not_treated_as_a_timestamp() {
+        assert!(!looks_like_timestamp("thread"));
+        assert!(looks_like_timestamp("2026-08-24T06:00:00.0Z"));
+    }
+
     #[test]
     fn every_written_level_has_a_distinct_colour() {
         let codes: std::collections::HashSet<_> =
             ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
                 .iter()
-                .map(|level| level_color(level).unwrap())
+                .map(|level| color::level_code(level).unwrap())
                 .collect();
 
         assert_eq!(codes.len(), 5);

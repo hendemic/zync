@@ -15,6 +15,7 @@ use zync_adapters::{config, open_frame_source};
 use zync_core::app::{ControlCommand, Supervisor, SyncLoop};
 use zync_core::domain::Config;
 
+use crate::color;
 use crate::service;
 
 /// Time allowed for queued publishes — the restore commands especially — to
@@ -128,11 +129,15 @@ fn start(foreground: bool) -> Result<()> {
 
     let pid = service::spawn_detached()?;
     let instance = config::resolve_instance(config.instance.as_deref());
+    let painted = color::enabled();
 
-    println!("zync is running in the background (pid {pid}, instance {instance}).");
-    println!("  zync logs -f    follow what it is doing");
-    println!("  zync logs -sv   everything from this run, in detail");
-    println!("  zync stop       stop it and fade the lights back");
+    println!(
+        "zync is {} in the background (pid {pid}, instance {instance}).",
+        color::green("running", painted)
+    );
+    println!("  {}", color::dim("zync logs -f    follow what it is doing", painted));
+    println!("  {}", color::dim("zync logs -sv   everything from this run, in detail", painted));
+    println!("  {}", color::dim("zync stop       stop it and fade the lights back", painted));
 
     Ok(())
 }
@@ -186,12 +191,14 @@ fn stop() -> Result<()> {
     let instance = config::resolve_instance(config.instance.as_deref());
 
     mqtt::request_shutdown(&config.mqtt, &instance)?;
+    let painted = color::enabled();
 
     if service::await_exit(STOP_TIMEOUT) {
-        println!("Stopped zync ({instance}). The lights are fading back.");
+        println!("{} zync ({instance}). The lights are fading back.", color::green("Stopped", painted));
     } else {
         println!(
-            "Asked zync ({instance}) to stop, but it is still running. See `zync logs`."
+            "{} zync ({instance}) to stop, but it is still running. See `zync logs`.",
+            color::yellow("Asked", painted)
         );
     }
 
@@ -204,10 +211,11 @@ fn status() -> Result<()> {
         .ok()
         .and_then(|config| config.instance);
     let instance = config::resolve_instance(configured.as_deref());
+    let painted = color::enabled();
 
     match service::running_pid() {
-        Some(pid) => println!("zync is running (pid {pid})."),
-        None => println!("zync is not running."),
+        Some(pid) => println!("zync is {} (pid {pid}).", color::green("running", painted)),
+        None => println!("zync is {}.", color::yellow("not running", painted)),
     }
 
     let log = service::current_log()
@@ -215,9 +223,9 @@ fn status() -> Result<()> {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "unavailable".to_string());
 
-    println!("  instance  {instance}");
-    println!("  config    {}", config_path.display());
-    println!("  logs      {log}");
+    println!("  {}  {instance}", color::dim("instance", painted));
+    println!("  {}    {}", color::dim("config", painted), config_path.display());
+    println!("  {}      {log}", color::dim("logs", painted));
 
     Ok(())
 }

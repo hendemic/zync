@@ -10,6 +10,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 mod cli;
+mod color;
 mod service;
 
 use cli::Logging;
