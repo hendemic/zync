@@ -25,6 +25,10 @@ const FLUSH_GRACE: Duration = Duration::from_millis(400);
 /// How long `stop` waits to see the service actually go away.
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How many lines `zync logs` shows when neither --session nor --lines says
+/// otherwise.
+const DEFAULT_LOG_LINES: usize = 40;
+
 #[derive(Parser)]
 #[command(
     name = "zync",
@@ -50,7 +54,9 @@ pub enum Command {
     Status,
     /// Show what zync has been doing.
     Logs {
-        /// Keep printing new output until interrupted.
+        /// Keep printing new output until interrupted. Implies --session
+        /// unless --lines is given explicitly: watching what happens next
+        /// should not open with a page of whatever a past run left behind.
         #[arg(long, short)]
         follow: bool,
         /// Show only the most recent run, in full.
@@ -62,9 +68,10 @@ pub enum Command {
         /// Lowest level to show. Defaults to events only.
         #[arg(long, value_enum, default_value_t = service::LogLevel::Info)]
         level: service::LogLevel,
-        /// How many existing lines to show first. Ignored with --session.
-        #[arg(long, short = 'n', default_value_t = 40)]
-        lines: usize,
+        /// How many existing lines to show first. Ignored with --session,
+        /// and with --follow unless given explicitly.
+        #[arg(long, short = 'n')]
+        lines: Option<usize>,
     },
     /// The detached service process. Not for direct use.
     #[command(name = "__daemon", hide = true)]
@@ -86,6 +93,14 @@ pub enum Logging {
     Silent,
 }
 
+/// Following without being told otherwise means "just this session, as it
+/// happens" — mixing in whatever a past run logged reads as noise, not
+/// history. An explicit --lines opts back into the old tail-then-follow
+/// behaviour even while following.
+fn scope_to_session(follow: bool, session: bool, lines: Option<usize>) -> bool {
+    session || (follow && lines.is_none())
+}
+
 impl Command {
     pub fn logging(&self) -> Logging {
         match self {
@@ -105,8 +120,8 @@ impl Command {
             Command::Logs { follow, session, verbose, level, lines } => {
                 service::tail(service::LogView {
                     level: if verbose { service::LogLevel::Debug } else { level },
-                    session,
-                    lines,
+                    session: scope_to_session(follow, session, lines),
+                    lines: lines.unwrap_or(DEFAULT_LOG_LINES),
                     follow,
                 })
             }
@@ -257,6 +272,31 @@ mod tests {
         assert!(matches!(foreground.command, Command::Start { foreground: true }));
     }
 
+    #[test]
+    fn plain_follow_scopes_to_the_current_session() {
+        assert!(scope_to_session(true, false, None));
+    }
+
+    #[test]
+    fn follow_with_an_explicit_line_count_shows_history_instead() {
+        assert!(!scope_to_session(true, false, Some(100)));
+    }
+
+    #[test]
+    fn explicit_session_wins_even_without_follow() {
+        assert!(scope_to_session(false, true, None));
+    }
+
+    #[test]
+    fn a_plain_tail_is_not_session_scoped() {
+        assert!(!scope_to_session(false, false, None));
+    }
+
+    #[test]
+    fn follow_and_session_together_is_still_session_scoped() {
+        assert!(scope_to_session(true, true, Some(10)));
+    }
+
     /// The service writes the log file; a client process must not also open it.
     #[test]
     fn only_the_service_and_a_foreground_run_write_the_log_file() {
@@ -274,7 +314,7 @@ mod tests {
             session: false,
             verbose: false,
             level: service::LogLevel::Info,
-            lines: 40,
+            lines: None,
         }));
     }
 }
