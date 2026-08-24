@@ -33,9 +33,13 @@ const BRIGHTNESS_RESEND_DELTA: u8 = 4;
 /// enough for a mesh under load, short enough not to feel like a hang.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(2500);
 
-/// Fade applied when handing the lights back, so a session ends as a soft
-/// transition rather than a snap.
-const RESTORE_TRANSITION: f32 = 0.5;
+/// Fade applied when handing the lights back, so a session ends as a slow drift
+/// rather than a snap.
+///
+/// The app does not wait this out: `transition` becomes the ZCL transition time,
+/// which the bulb performs on its own, so the process can exit as soon as the
+/// publish reaches the broker.
+const RESTORE_TRANSITION: f32 = 5.0;
 
 #[derive(Deserialize)]
 struct LogMessage {
