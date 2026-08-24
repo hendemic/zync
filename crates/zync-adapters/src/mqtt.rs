@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result, bail};
 use rumqttc::{Client, Connection, Event, LastWill, MqttOptions, Packet, QoS};
+use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -98,7 +99,9 @@ impl MqttBus {
             .name("mqtt".into())
             .spawn({
                 let routes = Arc::clone(&routes);
-                move || pump(connection, routes)
+                let client = client.clone();
+                let status = status_topic.clone();
+                move || pump(connection, routes, client, status)
             })
             .context("Failed to start the MQTT event thread")?;
 
@@ -288,7 +291,14 @@ fn await_ack(connection: &mut Connection, deadline: Instant) -> Result<()> {
 }
 
 /// Drives the connection and fans incoming publishes out to their subscribers.
-fn pump(mut connection: Connection, routes: Arc<Mutex<Vec<Route>>>) {
+fn pump(
+    mut connection: Connection,
+    routes: Arc<Mutex<Vec<Route>>>,
+    client: Client,
+    status_topic: String,
+) {
+    let mut reconnecting = false;
+
     for event in connection.iter() {
         match event {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
@@ -305,13 +315,59 @@ fn pump(mut connection: Connection, routes: Arc<Mutex<Vec<Route>>>) {
                     });
                 }
             }
-            Ok(Event::Incoming(Packet::ConnAck(_))) => info!("connected to the MQTT broker"),
+            Ok(Event::Incoming(Packet::ConnAck(ack))) => {
+                info!(session_present = ack.session_present, "connected to the MQTT broker");
+                // The first connection's subscriptions are already queued by
+                // `subscribe`; only a reconnect has lost them.
+                if reconnecting {
+                    restore_session(&routes, &client, &status_topic);
+                }
+                reconnecting = true;
+            }
             Ok(_) => {}
             // The event loop reconnects on its own, so this is worth reporting
             // but not worth tearing anything down over.
             Err(e) => debug!(error = %e, "MQTT connection error; retrying"),
         }
     }
+}
+
+/// Re-establishes everything a reconnect silently dropped.
+///
+/// rumqttc never resubscribes, and its default clean session means the broker
+/// does not remember either. Without this, a broker restart or a dropped
+/// connection stops delivery-failure feedback and stops `zync stop` from being
+/// heard, while the app carries on looking perfectly healthy — and `zync stop`
+/// would still see its own publish acknowledged by the broker.
+///
+/// Everything here is non-blocking on purpose: this runs on the thread that has
+/// to drain the event loop, so a blocking send would deadlock against itself.
+fn restore_session(routes: &Arc<Mutex<Vec<Route>>>, client: &Client, status_topic: &str) {
+    let filters: Vec<String> = {
+        let Ok(routes) = routes.lock() else {
+            return;
+        };
+        let mut seen = HashSet::new();
+        routes
+            .iter()
+            .filter(|route| seen.insert(route.filter.as_str()))
+            .map(|route| route.filter.clone())
+            .collect()
+    };
+
+    for filter in &filters {
+        if let Err(e) = client.try_subscribe(filter.as_str(), QoS::AtMostOnce) {
+            warn!(filter, error = %e, "could not restore a subscription after reconnecting");
+        }
+    }
+
+    // The last will published `offline` when the connection dropped, so without
+    // this `zync stop` would report that nothing is running.
+    if let Err(e) = client.try_publish(status_topic, QoS::AtLeastOnce, true, ONLINE) {
+        warn!(error = %e, "could not re-announce this instance after reconnecting");
+    }
+
+    info!(subscriptions = filters.len(), "restored session after reconnecting");
 }
 
 /// MQTT topic filter matching: `+` covers one level, `#` covers the rest.
