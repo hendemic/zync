@@ -13,7 +13,13 @@ Tested with:
 - KDE Plasma (X11 + Wayland), Gnome Wayland
 - Z2M hosted in an LXC with an SLZB-06 coodinator.
 
-Note: In some fullscreen games on Gnome Wayland, you'll need to boot the game and then start this app and actually select the specific window. Still figuring out what can be done to make this work better, but fullscreen games sometimes bypass the pipewire stream in Gnome.
+Note: Fullscreen apps (games, fullscreen video) are captured on Gnome Wayland because the app negotiates DMA-BUF buffers for the screencast stream. If the startup line says it fell back to shared-memory capture, fullscreen apps won't be captured on Gnome and the lights will hold their last color until you leave fullscreen. See Troubleshooting below.
+
+## Requirements
+- A Rust toolchain to build.
+- GStreamer 1.24+ with the base plugins, including the OpenGL elements. Arch: `gst-plugins-base`. Debian/Ubuntu: `gstreamer1.0-plugins-base` + `gstreamer1.0-gl`.
+- The PipeWire GStreamer plugin. Arch: `gst-plugin-pipewire`. Debian/Ubuntu: `gstreamer1.0-pipewire`.
+- `xdg-desktop-portal` plus a backend for your desktop, e.g. `xdg-desktop-portal-gnome`.
 
 ## Usage
 To use, build with cargo. Create config.yaml at ~/.config/zync/config.yaml, or run the first time without a config and it should create a sample config file for you and panic. Edit it with your MQTT and light settings and start the program again.
@@ -75,3 +81,26 @@ performance:
 - CLI commands to start and stop, initialize a config, change settings
 - HomeAssistant trigger for sync. Use a toggle (or any automation) to start and exit the sync loop
 - Hue Gradient and other "segment" lights. Requires generics for "ZonePairs" and reworking Zone to Light mapping structure for a many-to-one relationship of Zones to a light's segments.
+
+## Troubleshooting
+
+### Checking what the capture is doing
+Run with `ZYNC_DEBUG=1` for diagnostics on stderr.
+
+At startup you get a line reporting the capture source resolution and the capture mode: DMA-BUF (frames stay on the GPU and are scaled there) or shared memory (the fallback path). Then a diagnostics line prints periodically:
+- `frames` — frames the compositor actually delivered during the reporting interval. `0` while a fullscreen app is open means the compositor stopped feeding the stream.
+- `sent` — light commands sent.
+- `deferred` — updates held back by the command budget.
+- `zones` — last sampled RGB per zone.
+
+### Lights freeze when a game or video goes fullscreen (Gnome Wayland)
+When Mutter hands a fullscreen window straight to the display (direct scanout), the monitor screencast stream stops delivering frames entirely unless the consumer negotiated DMA-BUF buffers. Shared-memory streams get zero frames until the app leaves fullscreen. This app negotiates DMA-BUF and scales frames on the GPU, so it handles that automatically — and it also avoids a full-resolution GPU to CPU readback that gnome-shell was doing for every frame, which was a big chunk of the CPU cost on Wayland.
+
+If the startup line reports shared-memory mode, try these in order:
+1. Install the GStreamer GL plugins listed under Requirements. Missing GL elements are the usual reason negotiation fails.
+2. `ZYNC_FORCE_SHM=1` exists only for A/B testing the two paths. It will reproduce the freeze — don't set it otherwise.
+3. System-side, direct scanout can be turned off compositor-wide with `MUTTER_DEBUG_PAINT=disable-direct-scanout` in gnome-shell's environment (e.g. a file in `~/.config/environment.d/`, then log out and back in), or with the "Disable unredirect fullscreen windows" Gnome extension. Both cost fullscreen latency and performance, so treat them as last resorts.
+4. Selecting the specific window instead of the monitor in the portal picker also works. Window streams don't depend on the compositor painting the screen.
+
+### Zigbee2MQTT logs show status=BUSY
+Lower `max_commands_per_sec` in the config. Groups are sent as multicast and will saturate the mesh well below any frame rate you'd want to run at.
