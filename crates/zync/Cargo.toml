@@ -1,0 +1,20 @@
+[package]
+name = "zync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zync"
+path = "src/main.rs"
+
+[dependencies]
+zync-core.workspace = true
+zync-adapters.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+dirs.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
