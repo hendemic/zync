@@ -1,25 +1,43 @@
-[package]
-name = "zync-lights"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/zync-core", "crates/zync-adapters", "crates/zync"]
+resolver = "3"
 
-[dependencies]
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
 anyhow = "1.0.100"
 chrono = "0.4.42"
+clap = { version = "4.5", features = ["derive"] }
+# "termination" so a plain `kill` on the service is graceful and still
+# restores the lights, not just Ctrl-C.
+ctrlc = { version = "3.5", features = ["termination"] }
 dirs = "6.0.0"
-image = "0.25.8"
+hostname = "0.4.2"
+libc = "0.2"
 rumqttc = "0.25.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yaml = "0.9.34"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 xcap = "0.9.8"
+
 # The "pipewire" feature is deliberately omitted: we only use ashpd to negotiate
 # the portal session and read the stream's node id, then hand that id to
 # GStreamer's pipewiresrc. Enabling it pulls in libspa, which fails to build
 # against current PipeWire headers.
-ashpd = { version = "0.12.0" }
-# pipewire = "0.8"
-tokio = { version = "1.48.0", features = ["rt"] }
+ashpd = "0.12.0"
 gstreamer = "0.24.3"
 gstreamer-app = "0.24.2"
 gstreamer-video = "0.24"
+# rt-multi-thread is named explicitly because the portal thread builds a
+# `Runtime`, which needs it; relying on another crate to enable it is fragile.
+tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread"] }
+
+zync-core = { path = "crates/zync-core" }
+zync-adapters = { path = "crates/zync-adapters" }
