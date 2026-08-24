@@ -167,8 +167,9 @@ zync            the binary: logging, CLI
 zync logs                 # recent events
 zync logs -f              # follow
 zync logs -s              # just the most recent run, in full
-zync logs -v              # include per-frame detail
+zync logs -v              # include per-frame detail (same as --level debug)
 zync logs --level warn    # problems only
+zync logs --level all     # everything in the file
 zync logs -n 200          # more history
 ```
 

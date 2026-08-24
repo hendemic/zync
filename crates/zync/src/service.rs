@@ -171,18 +171,24 @@ pub fn await_exit(timeout: Duration) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 #[clap(rename_all = "lower")]
 pub enum LogLevel {
-    Trace,
+    /// Everything in the file. Identical to `debug` unless `RUST_LOG` was
+    /// widened when the service started, since nothing here logs at trace.
+    #[value(alias = "trace")]
+    All,
+    /// Per-frame detail: frame rate, frames delivered, per-zone colour and pacing.
     Debug,
     /// Events: started, connected, stopped, lights restored, problems.
     Info,
+    /// Warnings and errors.
     Warn,
+    /// Errors only.
     Error,
 }
 
 impl LogLevel {
     fn parse(token: &str) -> Option<Self> {
         match token {
-            "TRACE" => Some(LogLevel::Trace),
+            "TRACE" => Some(LogLevel::All),
             "DEBUG" => Some(LogLevel::Debug),
             "INFO" => Some(LogLevel::Info),
             "WARN" => Some(LogLevel::Warn),
@@ -387,6 +393,21 @@ mod tests {
     #[test]
     fn a_debug_view_shows_everything_already_recorded() {
         assert_eq!(selected(SAMPLE, &view(LogLevel::Debug, false, 100)).len(), 6);
+    }
+
+    /// `all` and `trace` name the same threshold, and both must reach it.
+    #[test]
+    fn all_is_the_lowest_threshold_and_accepts_trace_as_a_name() {
+        use clap::ValueEnum;
+
+        assert_eq!(LogLevel::from_str("all", false), Ok(LogLevel::All));
+        assert_eq!(LogLevel::from_str("trace", false), Ok(LogLevel::All));
+        assert!(LogLevel::All < LogLevel::Debug);
+        assert_eq!(
+            selected(SAMPLE, &view(LogLevel::All, false, 100)).len(),
+            selected(SAMPLE, &view(LogLevel::Debug, false, 100)).len(),
+            "nothing here logs at trace, so the two agree"
+        );
     }
 
     #[test]
