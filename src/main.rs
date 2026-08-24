@@ -1,7 +1,10 @@
 use std::thread;
-use anyhow::Result;
-use rumqttc::Client;
+use anyhow::{Context, Result};
+use rumqttc::{Client, Event, Packet, QoS};
+use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::capture::{ZoneConfig, ZoneSampler, new_screen};
 use crate::config::AppConfig;
@@ -12,27 +15,61 @@ mod lights;
 mod capture;
 mod sync;
 
+/// Zigbee2MQTT republishes its own log stream here. It is the only place the
+/// mesh tells us a command was refused, since publishes are fire-and-forget.
+const Z2M_LOG_TOPIC: &str = "zigbee2mqtt/bridge/logging";
+
+#[derive(Deserialize)]
+struct Z2MLogMessage {
+    level: String,
+    message: String,
+}
+
+/// Detects the "failed to send / BUSY" class of log entry that indicates the
+/// Zigbee mesh is congested and we should back off.
+fn is_delivery_failure(payload: &[u8]) -> bool {
+    serde_json::from_slice::<Z2MLogMessage>(payload)
+        .map(|log| log.level == "error" && log.message.contains("failed"))
+        .unwrap_or(false)
+}
 
 fn main() -> Result<()> {
 
     // Load configuratoin and initialize all objects to pass into sync engine
     let config = AppConfig::load()?;
     let (client, mut connection) = config.mqtt.create_client()?;
+
+    // The capture source is created first because it defines the coordinate space
+    // zones are written in. Users configure zones at native display resolution;
+    // translating those onto whatever the capture pipeline delivers is our job.
+    let screen = new_screen()?;
+    let source_size = screen.source_size();
+
+    let light_failures = Arc::new(AtomicU64::new(0));
+
     let adaptive_rate = AdaptiveRate::new_from_fps(
                             config.performance.max_fps,
                             config.performance.max_delay,
                             config.performance.percent_thread_work,
+                            Arc::clone(&light_failures),
     );
-    let zone_map = extract_zones_and_lights(config.lights, config.zones, &client)?;
-    let screen = new_screen()?;
+    let zone_map = extract_zones_and_lights(config.lights, config.zones, &client, source_size)?;
+
+    client.subscribe(Z2M_LOG_TOPIC, QoS::AtMostOnce)
+        .context("Failed to subscribe to the Zigbee2MQTT log topic")?;
 
     // create SyncEngine -- this is the main loop that runs the program
     let mut engine = SyncEngine::new(screen, zone_map, adaptive_rate, config.performance, config.downsample_factor);
 
-    // start notification thread
+    // start notification thread. Draining this also drives the MQTT event loop, so
+    // it is required regardless of whether we inspect the messages.
     thread::spawn(move || {
-        for _notification in connection.iter().enumerate() {
-            // println!("Notification = {:?}", notification);
+        for event in connection.iter() {
+            if let Ok(Event::Incoming(Packet::Publish(publish))) = event {
+                if publish.topic == Z2M_LOG_TOPIC && is_delivery_failure(&publish.payload) {
+                    light_failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
     });
 
@@ -45,6 +82,7 @@ fn extract_zones_and_lights(
     lights: Vec<LightConfig>,
     zones: Vec<ZoneConfig>,
     client: &Client,
+    source_size: (u32, u32),
 ) -> Result<Vec<ZonePair<'_>>>{
 
     //initialize LightController instances and assemble in light_controllers hashmap
@@ -59,7 +97,7 @@ fn extract_zones_and_lights(
     let mut zone_samplers: Vec<ZoneSampler> = Vec::new();
 
     for zone in zones {
-        let zone_sampler = ZoneSampler::new(zone)?;
+        let zone_sampler = ZoneSampler::new(zone, source_size)?;
         zone_samplers.push(zone_sampler);
     }
 

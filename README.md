@@ -29,14 +29,17 @@ mqtt:
   user: "user name"         # optional depending on broker config
   password: "password"      # optional depending on broker config
 
-downsample_factor: 20
+downsample_factor: 20       # pixel stride, in native display pixels
 
 lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
     service: "Zigbee2MQTT"
     brightness: 0.8                   # percent brightness of light. range is 0-1. anything over 1 will be capped to 1 by the app.
 
-zone:
+# Zones are always given in your display's native resolution. The app captures at
+# a much smaller internal resolution for performance and converts these
+# coordinates for you, so never scale them down yourself.
+zones:
   - name: "main_screen"
     x: 0
     y: 0
@@ -50,14 +53,18 @@ performance:
   refresh_threshold: 10             # difference in color required to send MQTT light change
   percent_thread_work: 0.25         # max work/interval ratio.
   fps_reporting: 10                 # time in seconds between fps averages output in terminal. raise percent_thread_work for higher FPS.
+  max_commands_per_sec: 6           # ceiling on light commands/sec across all zones.
+                                    # Zigbee groups saturate well below the frame
+                                    # rate; lower this if you see BUSY errors in Z2M.
 ```
 
 ## Current features
 - Connects to MQTT broker and sends messages to Z2M to control lights
 - Support for X11 Linux and Wayland
 - Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps.
-- Adaptive framerate. Config sets target for percent of thread time used for screen capture (e.g. 10fps = 100ms thread time. 0.25 means 25ms capture time will throttle framerate). This gives the user some control over CPU thread usage and handles spikes in performance by throttling.
-  - This approach only works on X11. Wayland with pipewire is extremely low latency and the pipewire stream is what uses the most CPU.
+- Adaptive framerate driven by the light network itself. Zigbee2MQTT's log stream is monitored for delivery failures, and the send rate backs off whenever the mesh reports congestion. `percent_thread_work` remains as a secondary CPU guard (e.g. 10fps = 100ms thread time; 0.25 means 25ms of capture time will throttle the framerate).
+  - Earlier versions throttled on CPU work time alone. That only ever worked on X11, where a screen grab is genuinely expensive; on Wayland the capture is a cheap buffer read, so the loop never backed off and flooded the Zigbee mesh instead.
+- `max_commands_per_sec` puts a hard ceiling on commands reaching the mesh, independent of framerate. Zone updates that exceed the budget stay pending rather than being dropped.
 
 ## Roadmap
 ### Planned

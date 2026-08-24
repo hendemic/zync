@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::thread;
 use serde::Deserialize;
@@ -14,6 +16,12 @@ const TRANSITION_SOFTNESS: f32 = 0.4;
 const TRANSITION_MIN: f32 = 0.02;
 const TRANSITION_MAX: f32 = 1.0;
 
+/// Zigbee groups multicast, and a saturated mesh answers with BUSY rather than
+/// queueing, so the safe sustained command rate is far below any frame rate.
+fn default_max_commands_per_sec() -> f32 {
+    6.0
+}
+
 #[derive(Deserialize)]
 pub struct PerformanceConfig {
     pub max_fps: u64,
@@ -21,6 +29,47 @@ pub struct PerformanceConfig {
     pub refresh_threshold: u8,
     pub percent_thread_work: f32,
     pub fps_reporting: u64,
+    /// Ceiling on light commands per second across every zone. Configs written
+    /// before this field existed keep loading, hence the default.
+    #[serde(default = "default_max_commands_per_sec")]
+    pub max_commands_per_sec: f32,
+}
+
+/// Token bucket bounding how fast commands reach the light network.
+///
+/// This exists because CPU work time is a poor proxy for mesh health: capture got
+/// dramatically cheaper on Wayland, which removed the accidental backpressure that
+/// had been keeping command rates survivable, and the mesh flooded.
+struct CommandBudget {
+    tokens: f32,
+    capacity: f32,
+    refill_per_sec: f32,
+    last_refill: Instant,
+}
+
+impl CommandBudget {
+    fn new(commands_per_sec: f32) -> Self {
+        let rate = commands_per_sec.max(0.1);
+        CommandBudget {
+            tokens: rate,
+            capacity: rate.max(1.0),
+            refill_per_sec: rate,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn try_consume(&mut self) -> bool {
+        let elapsed = self.last_refill.elapsed().as_secs_f32();
+        self.last_refill = Instant::now();
+        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// This is handles a zone and its cooresponding lights. Defined here to maintain independence between light and capture modules.
@@ -44,11 +93,15 @@ pub struct AdaptiveRate {
     consecutive_failures: u16,
     consecutive_successes: u16,
     percent_thread_work: f32,
+    /// Delivery failures reported by the light service. This is the only signal
+    /// that actually reflects mesh health — CPU timing cannot observe it.
+    light_failures: Arc<AtomicU64>,
+    last_seen_failures: u64,
 }
 
 impl AdaptiveRate {
     #[allow(dead_code)] // not using new. keeping for testing.
-    pub fn new (target_interval: u64, current_interval: u64, max_interval: u64, percent_thread_work: f32) -> Self {
+    pub fn new (target_interval: u64, current_interval: u64, max_interval: u64, percent_thread_work: f32, light_failures: Arc<AtomicU64>) -> Self {
         AdaptiveRate {
             target_interval,
             current_interval,
@@ -56,16 +109,21 @@ impl AdaptiveRate {
             consecutive_failures: 0,
             consecutive_successes: 0,
             percent_thread_work,
+            light_failures,
+            last_seen_failures: 0,
         }
     }
-    pub fn new_from_fps (fps: u64, max_interval: u64, percent_thread_work: f32) -> Self {
+    pub fn new_from_fps (fps: u64, max_interval: u64, percent_thread_work: f32, light_failures: Arc<AtomicU64>) -> Self {
+        let interval = 1000 / fps.max(1);
         AdaptiveRate {
-            target_interval: 1000 / fps,
-            current_interval: 1000 / fps,
+            target_interval: interval,
+            current_interval: interval,
             max_interval,
             consecutive_failures: 0,
             consecutive_successes: 0,
             percent_thread_work,
+            light_failures,
+            last_seen_failures: 0,
         }
     }
     /// After successful messages, this function increases the framerate back toward its target.
@@ -120,12 +178,18 @@ impl AdaptiveRate {
     }
     fn adjust_timing(&mut self, work_time: u64) -> u64 {
 
-        // setting threshold for throttling to 1/3 the target rate to avoid high CPU usage
-        // My theory is that this ratio of work time to interval time is what determines CPU usage
-        // (aka CPU % thread usage is proportional to work_time/target_interval. Need to test this.)
-        let throttle_threshold = (self.current_interval as f32 * self.percent_thread_work) as u64;
+        // Delivery failures observed since the last tick. These drive throttling now;
+        // work time alone made Wayland speed up into an already-saturated mesh,
+        // because its capture is a cheap buffer read rather than a real screen grab.
+        let observed = self.light_failures.load(Ordering::Relaxed);
+        let new_failures = observed.saturating_sub(self.last_seen_failures);
+        self.last_seen_failures = observed;
 
-        if work_time > throttle_threshold {
+        // Work time is kept only as a guard against the loop starving the machine.
+        let throttle_threshold = (self.current_interval as f32 * self.percent_thread_work) as u64;
+        let cpu_pressure = work_time > throttle_threshold;
+
+        if new_failures > 0 || cpu_pressure {
             self.throttle_framerate();
         } else {
             self.restore_framerate();
@@ -148,6 +212,7 @@ pub struct SyncEngine<'a> {
     screen: Box<dyn ScreenCapture>,
     zones: Vec<ZonePair<'a>>,
     rate: AdaptiveRate,
+    budget: CommandBudget,
     config: PerformanceConfig,
     downsample: u8,
     interval_samples: Vec<u64>,
@@ -156,10 +221,12 @@ pub struct SyncEngine<'a> {
 
 impl<'a> SyncEngine<'a> {
     pub fn new(screen: Box<dyn ScreenCapture>, zones: Vec<ZonePair<'a>>, rate: AdaptiveRate, config: PerformanceConfig, downsample: u8) -> Self {
+        let budget = CommandBudget::new(config.max_commands_per_sec);
         SyncEngine {
             screen,
             zones,
             rate,
+            budget,
             config,
             downsample,
             interval_samples: Vec::new(),
@@ -208,6 +275,13 @@ impl<'a> SyncEngine<'a> {
                             };
 
                 if !update {
+                    continue;
+                }
+
+                // Out of budget: deliberately leave previous_sample untouched so the
+                // change stays pending and goes out as soon as the mesh has headroom,
+                // rather than being silently dropped.
+                if !self.budget.try_consume() {
                     continue;
                 }
 

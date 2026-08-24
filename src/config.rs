@@ -58,14 +58,17 @@ mqtt:
   user: "user name"         # optional depending on broker config
   password: "password"      # optional depending on broker config
 
-downsample_factor: 20
+downsample_factor: 20       # pixel stride, in native display pixels
 
 lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
     service: "Zigbee2MQTT"
     brightness: 0.8                   # percent brightness of light. range is 0-1. anything over 1 will be capped to 1 by the app.
 
-zone:
+# Zones are always given in your display's native resolution. The app captures at
+# a much smaller internal resolution for performance and converts these
+# coordinates for you, so never scale them down yourself.
+zones:
   - name: "main_screen"
     x: 0
     y: 0
@@ -79,6 +82,9 @@ performance:
   refresh_threshold: 10             # difference in color required to send MQTT light change
   percent_thread_work: 0.25         # max work/interval ratio.
   fps_reporting: 10                 # time in seconds between fps averages output in terminal. raise percent_thread_work for higher FPS.
+  max_commands_per_sec: 6           # ceiling on light commands/sec across all zones.
+                                    # Zigbee groups saturate well below the frame
+                                    # rate; lower this if you see BUSY errors in Z2M.
 "###
     }
 }
