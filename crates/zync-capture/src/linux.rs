@@ -19,7 +19,7 @@ use xcap::Monitor;
 use zync_core::domain::Frame;
 use zync_core::ports::FrameSource;
 
-use crate::config::State;
+use zync_adapters::config::State;
 
 /// Averaging a zone's colour needs almost no spatial detail, so frames are scaled
 /// down inside the pipeline rather than hauling native-resolution buffers around.

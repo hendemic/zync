@@ -28,7 +28,7 @@ const LOG_FILES_KEPT: usize = 7;
 /// everything. zbus is quieter still, because it warns about property caching for
 /// every portal request whose object has already gone away.
 const DEFAULT_FILTER: &str =
-    "info,zync=debug,zync_core=debug,zync_adapters=debug,zbus=error";
+    "info,zync=debug,zync_core=debug,zync_adapters=debug,zync_capture=debug,zbus=error";
 
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();

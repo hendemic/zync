@@ -1,8 +1,9 @@
 //! Screen capture, one backend per platform, all behind [`FrameSource`].
 //!
-//! This is the only platform-specific part of the app. Each backend owns its
-//! own native dependencies and threading; nothing above this module knows which
-//! one is running.
+//! This is the only platform-specific part of the app, and the only crate that
+//! may use `unsafe`: every other crate forbids it, so the native boundary is
+//! confined to here. Each backend owns its own dependencies and threading;
+//! nothing above this crate knows which one is running.
 
 use anyhow::Result;
 use zync_core::ports::FrameSource;
