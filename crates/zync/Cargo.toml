@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 zync-core.workspace = true
 zync-adapters.workspace = true
+zync-capture.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true

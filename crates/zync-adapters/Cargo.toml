@@ -14,13 +14,3 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 tracing.workspace = true
-
-# Capture backends are the only platform-specific part of the app, so the heavy
-# native dependencies are gated here rather than carried on every target.
-[target.'cfg(target_os = "linux")'.dependencies]
-ashpd.workspace = true
-gstreamer.workspace = true
-gstreamer-app.workspace = true
-gstreamer-video.workspace = true
-tokio.workspace = true
-xcap.workspace = true

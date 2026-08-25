@@ -11,7 +11,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 use zync_adapters::lights::Z2mSink;
 use zync_adapters::mqtt::{self, MqttBus};
-use zync_adapters::{config, open_frame_source};
+use zync_adapters::config;
 use zync_core::app::{ControlCommand, Supervisor, SyncLoop};
 use zync_core::domain::Config;
 
@@ -150,7 +150,7 @@ fn run_session(config: Config) -> Result<()> {
         MqttBus::connect(&config.mqtt, &instance).context("Could not connect to MQTT")?,
     );
     let sink = Z2mSink::new(Arc::clone(&bus), &config)?;
-    let frames = open_frame_source()?;
+    let frames = zync_capture::open()?;
 
     let session = SyncLoop::new(&config, frames, Box::new(sink))?;
     let (mut supervisor, control) = Supervisor::new(session);

@@ -1,9 +1,5 @@
 //! Linux screen capture: a PipeWire screencast on Wayland, plain screenshots on
 //! X11. Both are exposed as a [`FrameSource`].
-//!
-//! This is the only platform-specific part of the app. When macOS and Windows
-//! backends arrive, this file becomes `capture/` with one file per platform and
-//! nothing above it changes.
 
 use anyhow::{Context, Result, anyhow, bail};
 use ashpd::desktop::PersistMode;
@@ -23,7 +19,7 @@ use xcap::Monitor;
 use zync_core::domain::Frame;
 use zync_core::ports::FrameSource;
 
-use crate::config::State;
+use zync_adapters::config::State;
 
 /// Averaging a zone's colour needs almost no spatial detail, so frames are scaled
 /// down inside the pipeline rather than hauling native-resolution buffers around.
