@@ -3,7 +3,7 @@ members = ["crates/zync-core", "crates/zync-adapters", "crates/zync-capture", "c
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
