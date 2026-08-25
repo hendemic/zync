@@ -5,6 +5,7 @@
 //! following its log file.
 
 use anyhow::{Context, Result, anyhow, bail};
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -196,6 +197,58 @@ impl LogLevel {
             _ => None,
         }
     }
+
+    /// The colours tracing's own console output uses, so a followed log reads
+    /// the same as a foreground run.
+    fn ansi_colour(self) -> &'static str {
+        match self {
+            LogLevel::All => "\x1b[35m",
+            LogLevel::Debug => "\x1b[34m",
+            LogLevel::Info => "\x1b[32m",
+            LogLevel::Warn => "\x1b[33m",
+            LogLevel::Error => "\x1b[31m",
+        }
+    }
+}
+
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// Colours log lines at read time. The file itself is kept free of escape
+/// codes so it stays greppable, and so a piped `zync logs` is too.
+#[derive(Clone, Copy)]
+struct Painter {
+    enabled: bool,
+}
+
+impl Painter {
+    fn for_stdout() -> Self {
+        use std::io::IsTerminal;
+        Painter { enabled: std::io::stdout().is_terminal() }
+    }
+
+    /// Dims the timestamp and tints the level. A line of unexpected shape is
+    /// returned untouched rather than mangled.
+    fn paint(self, line: &str) -> Cow<'_, str> {
+        if !self.enabled {
+            return Cow::Borrowed(line);
+        }
+
+        let painted = line.split_once(' ').and_then(|(stamp, rest)| {
+            // The formatter right-aligns levels to five columns, so INFO and
+            // WARN arrive with a leading space that has to be preserved.
+            let padding = &rest[..rest.len() - rest.trim_start().len()];
+            let rest = rest.trim_start();
+            let (level, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+            let colour = LogLevel::parse(level)?.ansi_colour();
+
+            Some(format!(
+                "{ANSI_DIM}{stamp}{ANSI_RESET} {padding}{colour}{level}{ANSI_RESET} {tail}"
+            ))
+        });
+
+        painted.map_or(Cow::Borrowed(line), Cow::Owned)
+    }
 }
 
 /// How `logs` was asked to narrow things down.
@@ -254,11 +307,12 @@ pub fn tail(view: LogView) -> Result<()> {
     let mut path = newest_log(&dir)
         .ok_or_else(|| anyhow!("No log files yet in {}. Has zync run?", dir.display()))?;
 
+    let painter = Painter::for_stdout();
     let stdout = std::io::stdout();
     let mut out = BufWriter::new(stdout.lock());
 
     let mut file = File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
-    let mut offset = print_history(&mut file, &view, &mut out)?;
+    let mut offset = print_history(&mut file, &view, painter, &mut out)?;
     out.flush()?;
 
     if !view.follow {
@@ -279,7 +333,7 @@ pub fn tail(view: LogView) -> Result<()> {
             offset = 0;
         }
 
-        offset = print_appended(&mut file, offset, view.level, &mut out)?;
+        offset = print_appended(&mut file, offset, view.level, painter, &mut out)?;
         out.flush()?;
     }
 }
@@ -307,13 +361,18 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
         .max()
 }
 
-fn print_history(file: &mut File, view: &LogView, out: &mut impl Write) -> Result<u64> {
+fn print_history(
+    file: &mut File,
+    view: &LogView,
+    painter: Painter,
+    out: &mut impl Write,
+) -> Result<u64> {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .context("Failed to read the log file")?;
 
     for line in selected(&contents, view) {
-        writeln!(out, "{line}")?;
+        writeln!(out, "{}", painter.paint(line))?;
     }
 
     Ok(contents.len() as u64)
@@ -323,6 +382,7 @@ fn print_appended(
     file: &mut File,
     offset: u64,
     level: LogLevel,
+    painter: Painter,
     out: &mut impl Write,
 ) -> Result<u64> {
     let length = file.metadata().context("Failed to stat the log file")?.len();
@@ -339,7 +399,7 @@ fn print_appended(
         .context("Failed to read the log file")?;
 
     for line in appended.lines().filter(|line| included(line, level)) {
-        writeln!(out, "{line}")?;
+        writeln!(out, "{}", painter.paint(line))?;
     }
 
     Ok(start + appended.len() as u64)
@@ -485,6 +545,24 @@ mod tests {
             newest_log(&dir.0).unwrap().file_name().unwrap(),
             "zync.2026-08-24.log"
         );
+    }
+
+    #[test]
+    fn painting_tints_the_level_and_keeps_its_padding() {
+        let line = "2026-08-24T06:00:00.0Z  INFO zync::cli: hello";
+
+        let painted = Painter { enabled: true }.paint(line);
+
+        assert!(painted.starts_with("\x1b[2m2026-08-24T06:00:00.0Z\x1b[0m  \x1b[32mINFO\x1b[0m zync::cli: hello"));
+        assert_eq!(Painter { enabled: false }.paint(line), line);
+    }
+
+    /// A panic line has no level; it must come through untouched, not garbled.
+    #[test]
+    fn painting_leaves_unrecognised_lines_alone() {
+        let line = "thread 'main' panicked at src/lib.rs:1:1";
+
+        assert_eq!(Painter { enabled: true }.paint(line), line);
     }
 
     #[test]
