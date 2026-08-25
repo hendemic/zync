@@ -1,25 +1,94 @@
-[package]
-name = "zync-lights"
+[workspace]
+members = ["crates/zync-core", "crates/zync-adapters", "crates/zync-capture", "crates/zync"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.100"
 chrono = "0.4.42"
+clap = { version = "4.5", features = ["derive"] }
+# "termination" so a plain `kill` on the service is graceful and still
+# restores the lights, not just Ctrl-C.
+ctrlc = { version = "3.5", features = ["termination"] }
 dirs = "6.0.0"
-image = "0.25.8"
+hostname = "0.4.2"
+libc = "0.2"
 rumqttc = "0.25.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yaml = "0.9.34"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 xcap = "0.9.8"
+
 # The "pipewire" feature is deliberately omitted: we only use ashpd to negotiate
 # the portal session and read the stream's node id, then hand that id to
 # GStreamer's pipewiresrc. Enabling it pulls in libspa, which fails to build
 # against current PipeWire headers.
-ashpd = { version = "0.12.0" }
-# pipewire = "0.8"
-tokio = { version = "1.48.0", features = ["rt"] }
+ashpd = "0.12.0"
 gstreamer = "0.24.3"
 gstreamer-app = "0.24.2"
 gstreamer-video = "0.24"
+# rt-multi-thread is named explicitly because the portal thread builds a
+# `Runtime`, which needs it; relying on another crate to enable it is fragile.
+tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread"] }
+
+# macOS capture, on the objc2 bindings rather than the `screencapturekit`
+# crate: that one bridges through Swift, which needs a pinned SDK and a
+# build.rs in every consumer binary. These are plain FFI declarations with
+# neither. Features are enumerated instead of using each crate's default so
+# only the handful of headers we call is compiled.
+block2 = "0.6.2"
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
+objc2 = "0.6.4"
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    # CGMainDisplayID and the display mode, for the native pixel size.
+    "CGDirectDisplay",
+    # CGPreflightScreenCaptureAccess / CGRequestScreenCaptureAccess.
+    "CGWindow",
+] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CMSampleBuffer",
+    "CMSync",
+    "CMTime",
+    "objc2",
+    # CMSampleBuffer::image_buffer, which returns a CoreVideo type.
+    "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSEnumerator",
+    "NSError",
+    "NSString",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "SCShareableContent",
+    "SCStream",
+    "block2",
+    "dispatch2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+] }
+
+zync-core = { path = "crates/zync-core" }
+zync-adapters = { path = "crates/zync-adapters" }
+zync-capture = { path = "crates/zync-capture" }
