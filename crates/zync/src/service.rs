@@ -597,6 +597,21 @@ mod tests {
         );
     }
 
+    /// The formatter right-aligns levels to five columns, so INFO and WARN
+    /// arrive with a leading space that has to survive colouring.
+    #[test]
+    fn the_level_padding_is_preserved() {
+        let line = "2026-08-24T06:00:00.0Z  INFO zync::cli: hello";
+        let mut out = Vec::new();
+
+        write_line(&mut out, line, true).unwrap();
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[2;3m2026-08-24T06:00:00.0Z\x1b[0m  \x1b[32mINFO\x1b[0m zync::cli: hello\n"
+        );
+    }
+
     #[test]
     fn an_empty_directory_has_no_log() {
         let dir = TempDir::new("empty");

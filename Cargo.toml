@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/zync-core", "crates/zync-adapters", "crates/zync"]
+members = ["crates/zync-core", "crates/zync-adapters", "crates/zync-capture", "crates/zync"]
 resolver = "3"
 
 [workspace.package]
@@ -39,5 +39,56 @@ gstreamer-video = "0.24"
 # `Runtime`, which needs it; relying on another crate to enable it is fragile.
 tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread"] }
 
+# macOS capture, on the objc2 bindings rather than the `screencapturekit`
+# crate: that one bridges through Swift, which needs a pinned SDK and a
+# build.rs in every consumer binary. These are plain FFI declarations with
+# neither. Features are enumerated instead of using each crate's default so
+# only the handful of headers we call is compiled.
+block2 = "0.6.2"
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
+objc2 = "0.6.4"
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    # CGMainDisplayID and the display mode, for the native pixel size.
+    "CGDirectDisplay",
+    # CGPreflightScreenCaptureAccess / CGRequestScreenCaptureAccess.
+    "CGWindow",
+] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CMSampleBuffer",
+    "CMSync",
+    "CMTime",
+    "objc2",
+    # CMSampleBuffer::image_buffer, which returns a CoreVideo type.
+    "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSEnumerator",
+    "NSError",
+    "NSString",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "SCShareableContent",
+    "SCStream",
+    "block2",
+    "dispatch2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+] }
+
 zync-core = { path = "crates/zync-core" }
 zync-adapters = { path = "crates/zync-adapters" }
+zync-capture = { path = "crates/zync-capture" }
