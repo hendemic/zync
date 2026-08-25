@@ -1,23 +1,29 @@
 ## Overview
-Real-time ambilight clone for Linux + Zigbee2MQTT in Rust.
+Real-time ambilight clone for Linux and MacOS using Zigbee2MQTT.
 
 ## Demo
 https://github.com/user-attachments/assets/d539e25f-bb2c-441a-ba42-3de5c68eac9f
 
 ## Compatibility
 Z2M lights on Linux (Wayland and X11)
+Z2M lights on MacOS
 
 Tested with:
 - KDE Plasma (X11 + Wayland), Gnome Wayland
+- MacOS 26
 - Z2M hosted in an LXC with an SLZB-06 coodinator.
 
 Note: Fullscreen apps (games, fullscreen video) are captured on Gnome Wayland because the app negotiates DMA-BUF buffers for the screencast stream. If the startup line says it fell back to shared-memory capture, fullscreen apps won't be captured on Gnome and the lights will hold their last color until you leave fullscreen. See Troubleshooting below.
 
 ## Requirements
 - A Rust toolchain to build.
-- GStreamer 1.24+ with the base plugins, including the OpenGL elements. Arch: `gst-plugins-base`. Debian/Ubuntu: `gstreamer1.0-plugins-base` + `gstreamer1.0-gl`.
-- The PipeWire GStreamer plugin. Arch: `gst-plugin-pipewire`. Debian/Ubuntu: `gstreamer1.0-pipewire`.
-- `xdg-desktop-portal` plus a backend for your desktop, e.g. `xdg-desktop-portal-gnome`.
+- For Linux: 
+    - GStreamer 1.24+ with the base plugins, including the OpenGL elements. Arch: `gst-plugins-base`. Debian/Ubuntu: `gstreamer1.0-plugins-base` + `gstreamer1.0-gl`.
+    - The PipeWire GStreamer plugin. Arch: `gst-plugin-pipewire`. Debian/Ubuntu: `gstreamer1.0-pipewire`.
+    - `xdg-desktop-portal` plus a backend for your desktop, e.g. `xdg-desktop-portal-gnome`.
+- For macOS:
+    - Nothing to install. Capture goes through ScreenCaptureKit, called directly as FFI, so there are no build dependencies beyond the toolchain.
+    - Permission to record the screen. The system prompt is raised on first run; once it has been answered, changing it means visiting System Settings → Privacy & Security → Screen & System Audio Recording. macOS files the grant against whatever *launched* zync, so the entry to enable is the terminal you started it from — not zync itself.
 
 ## Usage
 Build with `cargo build --release`; the binary is `zync`.
@@ -50,11 +56,12 @@ The instance name defaults to your hostname, so pointing two machines at the sam
 Set `instance:` in the config only if you want a name other than the hostname.
 
 ### Files
+Paths below are the Linux ones. macOS has no XDG state directory, so both the config and the state land under `~/Library/Application Support/zync/` instead. `zync status` prints the resolved config and log paths for the machine you are on.
 
 | Path | Owner |
 |---|---|
 | `~/.config/zync/config.yaml` | you |
-| `~/.local/state/zync/state.json` | the app — currently the screencast portal's restore token |
+| `~/.local/state/zync/state.json` | the app — currently the screencast portal's restore token (Linux only) |
 | `~/.local/state/zync/zync.pid` | the app — the running service, so `status` and `stop` can find it |
 | `~/.local/state/zync/logs/zync.<date>.log` | the app — daily rotation, seven files kept. This is what `zync logs` reads |
 | `~/.local/state/zync/logs/stderr.log` | the app — anything that escapes the logger, such as a panic |
@@ -127,7 +134,7 @@ performance:
 
 ## Current features
 - Connects to MQTT broker and sends messages to Z2M to control lights
-- Support for X11 Linux and Wayland
+- Support for Linux (X11 and Wayland) and macOS, one capture backend per platform behind a common interface
 - Runs as a background service: `zync start`, `zync status`, `zync logs`, `zync stop`. Stop reaches the running instance over MQTT, so it works from any terminal
 - Lights are returned to their previous state on stop. Each light's state is read back from Z2M at startup; lights that don't report one (groups, usually) fall back to a configured `fallback_state`
 - Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps.
@@ -138,19 +145,22 @@ performance:
 - Multiple machines can sync against one broker; each is namespaced by its hostname unless `instance` says otherwise.
 
 ## Architecture
-Three crates, so the dependency direction is enforced by the compiler rather than by review. See `dev-notes/architecture.md`.
+Four crates, so the dependency direction is enforced by the compiler rather than by review. See `dev-notes/architecture.md`.
 
 ```
 zync-core       domain model, ports, sync loop, supervisor — no platform deps
-zync-adapters   capture, Zigbee2MQTT, MQTT bus, config on disk
+zync-capture    screen capture, one backend per platform
+zync-adapters   Zigbee2MQTT, MQTT bus, config on disk
 zync            the binary: logging, CLI
 ```
+
+`zync-capture` is the only crate allowed to use `unsafe`; every other crate forbids it, so the native boundary stays confined to the capture backends. Nothing above that crate knows which backend is running.
 
 ## Roadmap
 ### Planned
 - Home Assistant toggle to start and stop syncing. The control channel it needs already exists.
 - A TUI for creating zones visually.
-- macOS and Windows capture backends.
+- Windows capture backend.
 - Capture card feed for Raspi + HDMI capture card feed for TV support.
 - User controls over aesthetics through abstractions or direct variables (e.g. "intensity: high" uses a preconfigured transition settings. The user could override them in the config).
 
@@ -184,7 +194,7 @@ Per-frame diagnostics live at debug:
 - `capture rate` — the frame rate, once per `fps_reporting` seconds.
 - one line per zone with its last sampled colour, current pacing, and failures charged to it.
 
-At startup an event line reports the capture source resolution and the capture mode: DMA-BUF (frames stay on the GPU and are scaled there) or shared memory (the fallback path).
+At startup an event line reports the capture source resolution and the capture mode. On Linux that is DMA-BUF (frames stay on the GPU and are scaled there) or shared memory (the fallback path); on macOS it is ScreenCaptureKit, which scales in the compositor.
 
 ### Lights freeze when a game or video goes fullscreen (Gnome Wayland)
 When Mutter hands a fullscreen window straight to the display (direct scanout), the monitor screencast stream stops delivering frames entirely unless the consumer negotiated DMA-BUF buffers. Shared-memory streams get zero frames until the app leaves fullscreen. This app negotiates DMA-BUF and scales frames on the GPU, so it handles that automatically — and it also avoids a full-resolution GPU to CPU readback that gnome-shell was doing for every frame, which was a big chunk of the CPU cost on Wayland.
@@ -195,7 +205,7 @@ If the startup line reports shared-memory mode, try these in order:
 3. System-side, direct scanout can be turned off compositor-wide with `MUTTER_DEBUG_PAINT=disable-direct-scanout` in gnome-shell's environment (e.g. a file in `~/.config/environment.d/`, then log out and back in), or with the "Disable unredirect fullscreen windows" Gnome extension. Both cost fullscreen latency and performance, so treat them as last resorts.
 4. Selecting the specific window instead of the monitor in the portal picker also works. Window streams don't depend on the compositor painting the screen.
 
-### The monitor picker appears every time
+### The monitor picker appears every time (Linux)
 The portal's restore token is saved to `~/.local/state/zync/state.json`. Delete that file to be asked again; if it keeps reappearing, your portal backend may not be issuing a token.
 
 ### Zigbee2MQTT logs show status=BUSY
