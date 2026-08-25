@@ -145,7 +145,7 @@ performance:
 - Multiple machines can sync against one broker; each is namespaced by its hostname unless `instance` says otherwise.
 
 ## Architecture
-Four crates, so the dependency direction is enforced by the compiler rather than by review. See `dev-notes/architecture.md`.
+Four crates, so the dependency direction is enforced by the compiler rather than by review.
 
 ```
 zync-core       domain model, ports, sync loop, supervisor — no platform deps
