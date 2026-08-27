@@ -10,7 +10,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::domain::{Config, Frame, LightCommand, LightId, PerformanceConfig, Rgb, ZoneSampler};
+use crate::domain::{
+    Config, Frame, LightCommand, LightId, PerformanceConfig, Rgb, TransitionCurve, ZoneSampler,
+};
 use crate::ports::{FrameSource, LightSink};
 
 const FRAME_RECOVERY_RATE: f32 = 0.2;
@@ -243,6 +245,7 @@ pub struct SyncLoop {
     /// Overall ceiling across every light. Per-light budgets do the real pacing.
     budget: CommandBudget,
     performance: PerformanceConfig,
+    curve: TransitionCurve,
     downsample: u8,
     interval_samples: Vec<u64>,
     last_report: Instant,
@@ -300,6 +303,7 @@ impl SyncLoop {
             ),
             budget: CommandBudget::new(config.performance.max_commands_per_sec),
             performance: config.performance.clone(),
+            curve: config.intensity.curve(),
             downsample: config.downsample_factor,
             interval_samples: Vec::new(),
             last_report: Instant::now(),
@@ -345,6 +349,7 @@ impl SyncLoop {
                 &frame,
                 self.downsample,
                 self.performance.refresh_threshold,
+                self.curve,
                 self.sink.as_mut(),
                 &mut self.budget,
                 &mut self.commands_sent,
@@ -369,6 +374,7 @@ impl SyncLoop {
         frame: &Frame,
         downsample: u8,
         refresh_threshold: u8,
+        curve: TransitionCurve,
         sink: &mut dyn LightSink,
         global_budget: &mut CommandBudget,
         sent: &mut u64,
@@ -385,7 +391,7 @@ impl SyncLoop {
 
         let transition = zone
             .previous_sample
-            .map_or(1.0, |previous| previous.transition_to(&sample));
+            .map_or(curve.max_transition, |previous| curve.transition(&previous, &sample));
         let command = LightCommand::from_sample(sample, transition);
 
         // A change visible in the sample can still round to the command the light
@@ -525,7 +531,7 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{LightService, LightSpec, MqttConfig, StopPolicy, Zone};
+    use crate::domain::{Intensity, LightService, LightSpec, MqttConfig, StopPolicy, Zone};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -643,6 +649,7 @@ mod tests {
             },
             on_stop: StopPolicy::Restore,
             instance: None,
+            intensity: Intensity::Normal,
         }
     }
 

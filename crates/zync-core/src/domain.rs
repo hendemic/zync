@@ -22,13 +22,6 @@ const BRIGHTNESS_CURVE: f32 = 0.7;
 const GROUP_UPDATES_PER_SEC: f32 = 1.0;
 const DEVICE_UPDATES_PER_SEC: f32 = 4.0;
 
-/// Shapes how transition time falls off with colour distance. Below 1.0 it makes
-/// even small jumps reasonably quick, reserving the long fades for near-identical
-/// colours where a slow blend reads as smooth rather than sluggish.
-const TRANSITION_SOFTNESS: f32 = 0.4;
-const TRANSITION_MIN: f32 = 0.02;
-const TRANSITION_MAX: f32 = 1.0;
-
 /// Largest possible distance between two RGB triples, i.e. black to white.
 const MAX_COLOR_DISTANCE: f32 = 441.0;
 
@@ -78,6 +71,14 @@ pub enum ConfigError {
     BrightnessOutOfRange { light: LightId, brightness: f32 },
     #[error("zone '{zone}' references unknown light '{light}'")]
     UnknownLight { zone: String, light: LightId },
+    #[error("custom intensity curve has cut_midpoint {midpoint}; expected 0.0 to 1.0")]
+    CurveMidpointOutOfRange { midpoint: f32 },
+    #[error("custom intensity curve has cut_steepness {steepness}; expected a value greater than 0.0")]
+    CurveSteepnessNotPositive { steepness: f32 },
+    #[error("custom intensity curve has min_transition {min}; expected a non-negative value")]
+    CurveMinTransitionNegative { min: f32 },
+    #[error("custom intensity curve has min_transition {min} greater than max_transition {max}")]
+    CurveMinExceedsMax { min: f32, max: f32 },
 }
 
 /// A captured frame in RGBA8, borrowed rather than copied.
@@ -185,13 +186,92 @@ impl Rgb {
     pub fn differs_from(&self, other: &Rgb, threshold: u8) -> bool {
         self.distance(other) > threshold as f32
     }
+}
 
+/// Shapes how transition time falls off with colour distance.
+///
+/// `base(d)` is the old soft falloff: below 1.0, `softness` makes even small
+/// jumps reasonably quick, reserving the long fades for near-identical colours
+/// where a slow blend reads as smooth rather than sluggish. `gate` rides on top
+/// of that as a sigmoid centred on `cut_midpoint`: it stays near 1 (leaving
+/// `base` alone) for gradual changes and collapses toward 0 (pulling the result
+/// down to `min_transition`) once the distance passes the midpoint, so a cut or
+/// explosion fades out fast without changing the pacing of small changes at all.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+pub struct TransitionCurve {
+    /// Exponent applied to normalised distance in the base falloff.
+    pub softness: f32,
+    /// Normalised distance (0..=1) where the cut gate is half open.
+    pub cut_midpoint: f32,
+    /// How sharply the cut gate closes around `cut_midpoint`. Higher is snappier.
+    pub cut_steepness: f32,
+    /// Floor on transition time, in seconds.
+    pub min_transition: f32,
+    /// Ceiling on transition time, in seconds; also the fallback for a first
+    /// sample that has nothing to transition from.
+    pub max_transition: f32,
+}
+
+impl TransitionCurve {
     /// Fade time for moving between two samples: long for near-identical colours
-    /// so gradual scenes read as smooth, short for big jumps so cuts stay snappy.
-    pub fn transition_to(&self, other: &Rgb) -> f32 {
-        let normalized = (self.distance(other) / MAX_COLOR_DISTANCE).min(1.0);
+    /// so gradual scenes read as smooth, short for big jumps so cuts and
+    /// explosions stay snappy.
+    pub fn transition(&self, from: &Rgb, to: &Rgb) -> f32 {
+        let normalized = (from.distance(to) / MAX_COLOR_DISTANCE).min(1.0);
 
-        TRANSITION_MAX - normalized.powf(TRANSITION_SOFTNESS) * (TRANSITION_MAX - TRANSITION_MIN)
+        let base = self.max_transition
+            - normalized.powf(self.softness) * (self.max_transition - self.min_transition);
+        let gate = 1.0 / (1.0 + (self.cut_steepness * (normalized - self.cut_midpoint)).exp());
+
+        base * gate + self.min_transition * (1.0 - gate)
+    }
+}
+
+/// How aggressively big colour jumps are shortened, from a gentle "slow" fade
+/// through the default to "extreme", which snaps almost instantly on a cut.
+/// `Custom` takes a hand-tuned curve for anyone the presets don't fit.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Intensity {
+    /// Gentle fades throughout; suits film and ambient content where even cuts
+    /// should ease rather than snap.
+    Slow,
+    /// The default balance: quick on cuts, smooth on gradual changes.
+    #[default]
+    Normal,
+    /// Snaps almost instantly on cuts and explosions; suits fast-paced games.
+    Extreme,
+    /// A hand-tuned curve, given as its five parameters directly.
+    Custom(TransitionCurve),
+}
+
+impl Intensity {
+    /// Resolves a preset (or a custom setting, unchanged) to the curve it drives.
+    pub fn curve(&self) -> TransitionCurve {
+        match self {
+            Intensity::Slow => TransitionCurve {
+                softness: 0.6,
+                cut_midpoint: 0.6,
+                cut_steepness: 10.0,
+                min_transition: 0.10,
+                max_transition: 1.5,
+            },
+            Intensity::Normal => TransitionCurve {
+                softness: 0.4,
+                cut_midpoint: 0.4,
+                cut_steepness: 14.0,
+                min_transition: 0.02,
+                max_transition: 1.0,
+            },
+            Intensity::Extreme => TransitionCurve {
+                softness: 0.3,
+                cut_midpoint: 0.25,
+                cut_steepness: 16.0,
+                min_transition: 0.02,
+                max_transition: 0.6,
+            },
+            Intensity::Custom(curve) => *curve,
+        }
     }
 }
 
@@ -447,6 +527,10 @@ pub struct Config {
     /// for its hostname, which is an adapter's job, not the model's.
     #[serde(default)]
     pub instance: Option<String>,
+    /// How aggressively big colour jumps are shortened. Defaults to a balanced
+    /// preset so configs written before this field existed keep loading.
+    #[serde(default)]
+    pub intensity: Intensity,
 }
 
 impl Config {
@@ -480,6 +564,26 @@ impl Config {
                 zone: zone.name.clone(),
                 light: zone.light_name.clone(),
             });
+        }
+
+        if let Intensity::Custom(curve) = self.intensity {
+            if !(0.0..=1.0).contains(&curve.cut_midpoint) {
+                return Err(ConfigError::CurveMidpointOutOfRange { midpoint: curve.cut_midpoint });
+            }
+            if curve.cut_steepness <= 0.0 {
+                return Err(ConfigError::CurveSteepnessNotPositive {
+                    steepness: curve.cut_steepness,
+                });
+            }
+            if curve.min_transition < 0.0 {
+                return Err(ConfigError::CurveMinTransitionNegative { min: curve.min_transition });
+            }
+            if curve.min_transition > curve.max_transition {
+                return Err(ConfigError::CurveMinExceedsMax {
+                    min: curve.min_transition,
+                    max: curve.max_transition,
+                });
+            }
         }
 
         Ok(())
@@ -662,15 +766,160 @@ mod tests {
 
     #[test]
     fn big_colour_jumps_transition_faster_than_small_ones() {
+        let curve = Intensity::Normal.curve();
         let black = Rgb::new(0, 0, 0);
         let near = Rgb::new(4, 4, 4);
         let white = Rgb::new(255, 255, 255);
 
-        assert!(black.transition_to(&white) < black.transition_to(&near));
+        assert!(curve.transition(&black, &white) < curve.transition(&black, &near));
         // Black to white is the maximum distance, so it lands on the floor;
         // compare with a tolerance rather than exactly.
-        assert!(black.transition_to(&white) >= TRANSITION_MIN - 1e-6);
-        assert!(black.transition_to(&black) <= TRANSITION_MAX);
+        assert!(curve.transition(&black, &white) >= curve.min_transition - 1e-6);
+        assert!(curve.transition(&black, &black) <= curve.max_transition);
+    }
+
+    /// The old formula, before the cut gate was layered on top, kept for the
+    /// small-distance regression test below.
+    fn old_curve_transition(distance: f32) -> f32 {
+        const SOFTNESS: f32 = 0.4;
+        const MIN: f32 = 0.02;
+        const MAX: f32 = 1.0;
+
+        let normalized = (distance / MAX_COLOR_DISTANCE).min(1.0);
+        MAX - normalized.powf(SOFTNESS) * (MAX - MIN)
+    }
+
+    #[test]
+    fn normal_preset_matches_the_old_curve_for_small_distances() {
+        let curve = Intensity::Normal.curve();
+        let black = Rgb::new(0, 0, 0);
+
+        // d <= 0.2 of MAX_COLOR_DISTANCE, i.e. up to ~88 in RGB distance.
+        for distance in [0.0f32, 20.0, 50.0, 88.0] {
+            let to = Rgb::new(distance.min(255.0) as u8, 0, 0);
+            let old = old_curve_transition(distance);
+            let new = curve.transition(&black, &to);
+
+            assert!(
+                (old - new).abs() <= 0.03,
+                "distance {distance}: old={old}, new={new}, diff={}",
+                (old - new).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn normal_preset_is_much_faster_for_big_jumps() {
+        let curve = Intensity::Normal.curve();
+        let black = Rgb::new(0, 0, 0);
+        let white = Rgb::new(255, 255, 255);
+
+        assert!(
+            (curve.transition(&black, &white) - curve.min_transition).abs() < 1e-3,
+            "black to white should land on the floor"
+        );
+
+        // d = 0.5 of MAX_COLOR_DISTANCE; only the red channel differs from black,
+        // so that channel alone carries the whole distance.
+        let half = Rgb::new((MAX_COLOR_DISTANCE * 0.5) as u8, 0, 0);
+        assert!(
+            curve.transition(&black, &half) <= 0.10,
+            "d=0.5 should fade in 0.10s or less, got {}",
+            curve.transition(&black, &half)
+        );
+    }
+
+    /// Samples a curve's transition time across the full distance range, as
+    /// approximated by a single reddening channel from black.
+    fn sample_curve(curve: TransitionCurve) -> Vec<f32> {
+        let black = Rgb::new(0, 0, 0);
+        (0..=100)
+            .map(|step| {
+                let d = step as f32 / 100.0;
+                let to = Rgb::new((d * 255.0) as u8, (d * 255.0) as u8, (d * 255.0) as u8);
+                curve.transition(&black, &to)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_preset_is_monotonically_non_increasing_with_distance() {
+        for intensity in [Intensity::Slow, Intensity::Normal, Intensity::Extreme] {
+            let samples = sample_curve(intensity.curve());
+            assert!(
+                samples.windows(2).all(|pair| pair[0] >= pair[1] - 1e-4),
+                "{intensity:?} transition time should never increase with distance"
+            );
+        }
+    }
+
+    #[test]
+    fn slow_is_never_faster_than_normal_which_is_never_faster_than_extreme() {
+        let slow = sample_curve(Intensity::Slow.curve());
+        let normal = sample_curve(Intensity::Normal.curve());
+        let extreme = sample_curve(Intensity::Extreme.curve());
+
+        for i in 0..slow.len() {
+            assert!(slow[i] >= normal[i] - 1e-4, "slow[{i}]={} normal[{i}]={}", slow[i], normal[i]);
+            assert!(
+                normal[i] >= extreme[i] - 1e-4,
+                "normal[{i}]={} extreme[{i}]={}",
+                normal[i],
+                extreme[i]
+            );
+        }
+    }
+
+    #[test]
+    fn intensity_extreme_parses_from_a_bare_string() {
+        let intensity: Intensity = serde_json::from_str(r#""extreme""#).unwrap();
+        assert_eq!(intensity, Intensity::Extreme);
+    }
+
+    #[test]
+    fn intensity_custom_parses_from_a_table() {
+        let json = r#"{
+            "custom": {
+                "softness": 0.5,
+                "cut_midpoint": 0.5,
+                "cut_steepness": 12.0,
+                "min_transition": 0.05,
+                "max_transition": 1.2
+            }
+        }"#;
+        let intensity: Intensity = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            intensity,
+            Intensity::Custom(TransitionCurve {
+                softness: 0.5,
+                cut_midpoint: 0.5,
+                cut_steepness: 12.0,
+                min_transition: 0.05,
+                max_transition: 1.2,
+            })
+        );
+    }
+
+    #[test]
+    fn missing_intensity_defaults_to_normal() {
+        let config = config_with(vec![light("a", 0.8)], vec![zone_for("a")]);
+
+        assert_eq!(config.intensity, Intensity::Normal);
+    }
+
+    #[test]
+    fn custom_curve_with_min_above_max_fails_validation() {
+        let mut config = config_with(vec![light("a", 0.8)], vec![zone_for("a")]);
+        config.intensity = Intensity::Custom(TransitionCurve {
+            softness: 0.4,
+            cut_midpoint: 0.4,
+            cut_steepness: 14.0,
+            min_transition: 2.0,
+            max_transition: 1.0,
+        });
+
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -709,6 +958,7 @@ mod tests {
             },
             on_stop: StopPolicy::Restore,
             instance: None,
+            intensity: Intensity::Normal,
         }
     }
 
