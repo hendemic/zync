@@ -205,7 +205,12 @@ pub struct TransitionCurve {
     pub cut_midpoint: f32,
     /// How sharply the cut gate closes around `cut_midpoint`. Higher is snappier.
     pub cut_steepness: f32,
-    /// Floor on transition time, in seconds.
+    /// Floor on transition time, in seconds. Zigbee executes transitions in
+    /// tenths of a second, so anything below 0.1 becomes an instant jump — and
+    /// because colour and brightness travel as two separate Zigbee commands, an
+    /// instant jump shows the bulb at the new colour but old brightness for a
+    /// few tens of milliseconds, which reads as a stutter. 0.1 is the practical
+    /// minimum; the presets sit a little above it.
     pub min_transition: f32,
     /// Ceiling on transition time, in seconds; also the fallback for a first
     /// sample that has nothing to transition from.
@@ -219,19 +224,24 @@ impl TransitionCurve {
     pub fn transition(&self, from: &Rgb, to: &Rgb) -> f32 {
         let normalized = (from.distance(to) / MAX_COLOR_DISTANCE).min(1.0);
 
-        let base = self.max_transition
-            - normalized.powf(self.softness) * (self.max_transition - self.min_transition);
+        // The base falls toward zero rather than toward the floor, so raising the
+        // floor for the sake of cuts leaves the pacing of small changes alone.
+        let base = self.max_transition * (1.0 - normalized.powf(self.softness));
         let gate = 1.0 / (1.0 + (self.cut_steepness * (normalized - self.cut_midpoint)).exp());
 
-        base * gate + self.min_transition * (1.0 - gate)
+        (base * gate + self.min_transition * (1.0 - gate)).max(self.min_transition)
     }
 }
 
 /// How aggressively big colour jumps are shortened, from a gentle "slow" fade
 /// through the default to "extreme", which snaps almost instantly on a cut.
 /// `Custom` takes a hand-tuned curve for anyone the presets don't fit.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+///
+/// Deserialised by hand rather than derived: serde's default enum encoding is
+/// format-specific, and serde_yaml spells a data-carrying variant as a `!custom`
+/// tag, which is not something anyone would guess from the example config. See
+/// [`IntensityRepr`] for the shapes accepted.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Intensity {
     /// Gentle fades throughout; suits film and ambient content where even cuts
     /// should ease rather than snap.
@@ -245,6 +255,37 @@ pub enum Intensity {
     Custom(TransitionCurve),
 }
 
+/// The on-disk shapes for [`Intensity`]: a preset name (`normal`), a map with a
+/// single `custom` key holding the curve, or the curve's fields directly.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IntensityRepr {
+    Preset(Preset),
+    Wrapped { custom: TransitionCurve },
+    Bare(TransitionCurve),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Preset {
+    Slow,
+    Normal,
+    Extreme,
+}
+
+impl<'de> Deserialize<'de> for Intensity {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match IntensityRepr::deserialize(deserializer)? {
+            IntensityRepr::Preset(Preset::Slow) => Intensity::Slow,
+            IntensityRepr::Preset(Preset::Normal) => Intensity::Normal,
+            IntensityRepr::Preset(Preset::Extreme) => Intensity::Extreme,
+            IntensityRepr::Wrapped { custom } | IntensityRepr::Bare(custom) => {
+                Intensity::Custom(custom)
+            }
+        })
+    }
+}
+
 impl Intensity {
     /// Resolves a preset (or a custom setting, unchanged) to the curve it drives.
     pub fn curve(&self) -> TransitionCurve {
@@ -253,21 +294,21 @@ impl Intensity {
                 softness: 0.6,
                 cut_midpoint: 0.6,
                 cut_steepness: 10.0,
-                min_transition: 0.10,
+                min_transition: 0.25,
                 max_transition: 1.5,
             },
             Intensity::Normal => TransitionCurve {
                 softness: 0.4,
                 cut_midpoint: 0.4,
                 cut_steepness: 14.0,
-                min_transition: 0.02,
+                min_transition: 0.15,
                 max_transition: 1.0,
             },
             Intensity::Extreme => TransitionCurve {
                 softness: 0.3,
                 cut_midpoint: 0.25,
                 cut_steepness: 16.0,
-                min_transition: 0.02,
+                min_transition: 0.10,
                 max_transition: 0.6,
             },
             Intensity::Custom(curve) => *curve,
@@ -823,8 +864,8 @@ mod tests {
         // so that channel alone carries the whole distance.
         let half = Rgb::new((MAX_COLOR_DISTANCE * 0.5) as u8, 0, 0);
         assert!(
-            curve.transition(&black, &half) <= 0.10,
-            "d=0.5 should fade in 0.10s or less, got {}",
+            curve.transition(&black, &half) <= 0.20,
+            "d=0.5 should fade in 0.20s or less, got {}",
             curve.transition(&black, &half)
         );
     }

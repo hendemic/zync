@@ -225,7 +225,7 @@ on_stop: restore
 #       softness: 0.4          # falloff shape for small/gradual changes
 #       cut_midpoint: 0.4      # normalized colour distance (0-1) where the cut kicks in
 #       cut_steepness: 14.0    # how sharply transitions shorten past cut_midpoint
-#       min_transition: 0.02   # fastest allowed transition, in seconds
+#       min_transition: 0.15   # fastest allowed transition, in seconds (Zigbee rounds to tenths; below 0.1 is an instant jump)
 #       max_transition: 1.0    # slowest allowed transition, in seconds
 intensity: normal
 
@@ -278,6 +278,23 @@ mod tests {
         let config: Config = serde_yaml::from_str(EXAMPLE_CONFIG).expect("example must parse");
 
         assert!(config.validate().is_ok(), "example must be a usable configuration");
+    }
+
+    /// The README documents `custom:` as a nested map. serde_yaml's default enum
+    /// encoding would demand a `!custom` tag instead, which nobody would guess.
+    #[test]
+    fn a_custom_intensity_parses_from_yaml_as_a_nested_map() {
+        use zync_core::domain::Intensity;
+
+        let yaml = "custom:\n  softness: 0.4\n  cut_midpoint: 0.4\n  cut_steepness: 14.0\n  min_transition: 0.1\n  max_transition: 1.0\n";
+        let intensity: Intensity = serde_yaml::from_str(yaml).expect("nested map must parse");
+        let Intensity::Custom(curve) = intensity else {
+            panic!("expected a custom curve, got {intensity:?}");
+        };
+        assert_eq!(curve.min_transition, 0.1);
+
+        let preset: Intensity = serde_yaml::from_str("extreme").expect("preset must parse");
+        assert_eq!(preset, Intensity::Extreme);
     }
 
     #[test]
