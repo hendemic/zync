@@ -214,6 +214,21 @@ downsample_factor: 20       # pixel stride, in native display pixels
 #   hold     leave the lights on the last colour they were sent
 on_stop: restore
 
+# How aggressively big colour jumps (cuts, explosions) are shortened relative to
+# small, gradual changes:
+#   slow     gentle fades throughout — good for film and ambient content
+#   normal   the default balance (default if omitted)
+#   extreme  snaps almost instantly on cuts — good for fast-paced games
+# A custom curve is also accepted in place of a preset name:
+#   intensity:
+#     custom:
+#       softness: 0.4          # falloff shape for small/gradual changes
+#       cut_midpoint: 0.4      # normalized colour distance (0-1) where the cut kicks in
+#       cut_steepness: 14.0    # how sharply transitions shorten past cut_midpoint
+#       min_transition: 0.02   # fastest allowed transition, in seconds
+#       max_transition: 1.0    # slowest allowed transition, in seconds
+intensity: normal
+
 lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
     service: "Zigbee2MQTT"

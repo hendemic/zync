@@ -94,6 +94,21 @@ downsample_factor: 20       # pixel stride, in native display pixels
 #   hold     leave the lights on the last colour they were sent
 on_stop: restore
 
+# How aggressively big colour jumps (cuts, explosions) are shortened relative to
+# small, gradual changes:
+#   slow     gentle fades throughout — good for film and ambient content
+#   normal   the default balance (default if omitted)
+#   extreme  snaps almost instantly on cuts — good for fast-paced games
+# A custom curve is also accepted in place of a preset name:
+#   intensity:
+#     custom:
+#       softness: 0.4          # falloff shape for small/gradual changes
+#       cut_midpoint: 0.4      # normalized colour distance (0-1) where the cut kicks in
+#       cut_steepness: 14.0    # how sharply transitions shorten past cut_midpoint
+#       min_transition: 0.02   # fastest allowed transition, in seconds
+#       max_transition: 1.0    # slowest allowed transition, in seconds
+intensity: normal
+
 lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
     service: "Zigbee2MQTT"
@@ -137,7 +152,7 @@ performance:
 - Support for Linux (X11 and Wayland) and macOS, one capture backend per platform behind a common interface
 - Runs as a background service: `zync start`, `zync status`, `zync logs`, `zync stop`. Stop reaches the running instance over MQTT, so it works from any terminal
 - Lights are returned to their previous state on stop. Each light's state is read back from Z2M at startup; lights that don't report one (groups, usually) fall back to a configured `fallback_state`
-- Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps.
+- Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps, with a cut gate that snaps big jumps (cuts, explosions) even faster without changing the pacing of small, gradual changes. Tunable via `intensity` (`slow`, `normal`, `extreme`, or a custom curve).
 - Adaptive framerate driven by the light network itself. Zigbee2MQTT's log stream is monitored for delivery failures, and the send rate backs off whenever the mesh reports congestion. `percent_thread_work` remains as a secondary CPU guard (e.g. 10fps = 100ms thread time; 0.25 means 25ms of capture time will throttle the framerate).
   - Earlier versions throttled on CPU work time alone. That only ever worked on X11, where a screen grab is genuinely expensive; on Wayland the capture is a cheap buffer read, so the loop never backed off and flooded the Zigbee mesh instead.
 - `max_commands_per_sec` puts a hard ceiling on commands reaching the mesh, independent of framerate. Zone updates that exceed the budget stay pending rather than being dropped.
@@ -162,7 +177,6 @@ zync            the binary: logging, CLI
 - A TUI for creating zones visually.
 - Windows capture backend.
 - Capture card feed for Raspi + HDMI capture card feed for TV support.
-- User controls over aesthetics through abstractions or direct variables (e.g. "intensity: high" uses a preconfigured transition settings. The user could override them in the config).
 
 ### Other ideas in consideration
 - Hue Gradient and other "segment" lights. Requires reworking the zone-to-light mapping into a many-to-one relationship of zones to a light's segments.
