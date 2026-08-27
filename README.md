@@ -105,7 +105,7 @@ on_stop: restore
 #       softness: 0.4          # falloff shape for small/gradual changes
 #       cut_midpoint: 0.4      # normalized colour distance (0-1) where the cut kicks in
 #       cut_steepness: 14.0    # how sharply transitions shorten past cut_midpoint
-#       min_transition: 0.02   # fastest allowed transition, in seconds
+#       min_transition: 0.15   # fastest allowed transition, in seconds (Zigbee rounds to tenths; below 0.1 is an instant jump)
 #       max_transition: 1.0    # slowest allowed transition, in seconds
 intensity: normal
 
