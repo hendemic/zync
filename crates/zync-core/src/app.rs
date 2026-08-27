@@ -101,6 +101,13 @@ impl CommandBudget {
         self.tokens >= 1.0
     }
 
+    /// Whether `n` commands could all be taken right now. Used to admit a group
+    /// of same-frame zone updates as a unit rather than one token at a time.
+    fn has_tokens(&mut self, n: u32) -> bool {
+        self.refill();
+        self.tokens >= n as f32
+    }
+
     /// Caller must have checked [`Self::has_token`].
     fn take(&mut self) {
         self.tokens -= 1.0;
@@ -236,6 +243,14 @@ impl ZoneState {
     }
 }
 
+/// A zone's sampled colour and the command it would send, worked out during the
+/// planning pass before any budget is spent.
+struct PlannedCommand {
+    zone_index: usize,
+    sample: Rgb,
+    command: LightCommand,
+}
+
 /// One pass of capture, sampling, and publishing. Ticked by the [`Supervisor`].
 pub struct SyncLoop {
     frames: Box<dyn FrameSource>,
@@ -343,19 +358,29 @@ impl SyncLoop {
         let started = Instant::now();
         let frame = self.frames.next_frame()?;
 
-        for zone in &mut self.zones {
-            Self::update_zone(
+        let mut planned = Vec::new();
+        for (index, zone) in self.zones.iter_mut().enumerate() {
+            if let Some(command) = Self::plan_zone(
                 zone,
+                index,
                 &frame,
                 self.downsample,
                 self.performance.refresh_threshold,
                 self.curve,
                 self.sink.as_mut(),
-                &mut self.budget,
-                &mut self.commands_sent,
-                &mut self.commands_deferred,
-            )?;
+            )? {
+                planned.push(command);
+            }
         }
+
+        Self::commit_planned(
+            &mut self.zones,
+            planned,
+            self.sink.as_mut(),
+            &mut self.budget,
+            &mut self.commands_sent,
+            &mut self.commands_deferred,
+        )?;
 
         self.report();
 
@@ -364,29 +389,31 @@ impl SyncLoop {
         Ok(self.rate.next_delay(work_ms))
     }
 
-    /// Sampling and publishing for a single zone.
+    /// Samples one zone and works out what it would send, without spending any
+    /// budget. Splitting this from the commit means every zone that changed on
+    /// this frame can be judged against the budgets together, so a scene change
+    /// that moves several zones at once either reaches all of their lights or
+    /// none of them, rather than reaching them one at a time.
     ///
     /// Takes its collaborators as arguments rather than reading `self` so the
-    /// per-zone borrow does not conflict with the shared sink and budget.
+    /// per-zone borrow does not conflict with the shared sink.
     #[allow(clippy::too_many_arguments)]
-    fn update_zone(
+    fn plan_zone(
         zone: &mut ZoneState,
+        zone_index: usize,
         frame: &Frame,
         downsample: u8,
         refresh_threshold: u8,
         curve: TransitionCurve,
         sink: &mut dyn LightSink,
-        global_budget: &mut CommandBudget,
-        sent: &mut u64,
-        deferred: &mut u64,
-    ) -> Result<()> {
+    ) -> Result<Option<PlannedCommand>> {
         let sample = zone.sampler.sample(frame, downsample)?;
 
         let changed = zone
             .previous_sample
             .is_none_or(|previous| sample.differs_from(&previous, refresh_threshold));
         if !changed {
-            return Ok(());
+            return Ok(None);
         }
 
         let transition = zone
@@ -395,29 +422,64 @@ impl SyncLoop {
         let command = LightCommand::from_sample(sample, transition);
 
         // A change visible in the sample can still round to the command the light
-        // already holds. Record it and move on rather than spend budget.
+        // already holds. Record it and move on rather than treat it as pending.
         if !sink.would_send(&zone.light, command) {
             zone.previous_sample = Some(sample);
-            return Ok(());
+            return Ok(None);
         }
 
         zone.absorb_failures(sink.failures(&zone.light));
 
-        // Out of budget: deliberately leave previous_sample untouched so the
-        // change stays pending and goes out as soon as the mesh has headroom,
-        // rather than being silently dropped. Both budgets are checked before
-        // either is spent.
-        if !(zone.budget.has_token() && global_budget.has_token()) {
-            *deferred += 1;
+        Ok(Some(PlannedCommand { zone_index, sample, command }))
+    }
+
+    /// Admits a frame's worth of planned zone commands against the budgets and
+    /// sends whatever is admitted.
+    ///
+    /// A zone whose own light budget is empty is deferred on its own — a single
+    /// congested or failure-backed-off light must not indefinitely hold back
+    /// zones sharing nothing but the same frame. Among the zones that do have a
+    /// per-light token, the group is all-or-nothing against the shared global
+    /// budget: either every one of them fits, and all go out together, or none
+    /// of them do, and all stay pending for the next frame. Out of budget
+    /// deliberately leaves `previous_sample` untouched so the change stays
+    /// pending and goes out as soon as the mesh has headroom, rather than being
+    /// silently dropped.
+    fn commit_planned(
+        zones: &mut [ZoneState],
+        planned: Vec<PlannedCommand>,
+        sink: &mut dyn LightSink,
+        global_budget: &mut CommandBudget,
+        sent: &mut u64,
+        deferred: &mut u64,
+    ) -> Result<()> {
+        let mut ready = Vec::with_capacity(planned.len());
+        for command in planned {
+            if zones[command.zone_index].budget.has_token() {
+                ready.push(command);
+            } else {
+                *deferred += 1;
+            }
+        }
+
+        if ready.is_empty() {
             return Ok(());
         }
 
-        if sink.send(&zone.light, command)? {
-            zone.budget.take();
-            global_budget.take();
-            *sent += 1;
+        if !global_budget.has_tokens(ready.len() as u32) {
+            *deferred += ready.len() as u64;
+            return Ok(());
         }
-        zone.previous_sample = Some(sample);
+
+        for planned in ready {
+            let zone = &mut zones[planned.zone_index];
+            if sink.send(&zone.light, planned.command)? {
+                zone.budget.take();
+                global_budget.take();
+                *sent += 1;
+            }
+            zone.previous_sample = Some(planned.sample);
+        }
 
         Ok(())
     }
@@ -536,26 +598,45 @@ mod tests {
     use std::thread;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// Renders a solid colour by default, but the left and right halves can be
+    /// set independently so a test can drive two zones through different
+    /// samples on the same frame.
     struct FakeFrames {
-        color: Mutex<Rgb>,
+        left: Mutex<Rgb>,
+        right: Mutex<Rgb>,
         served: AtomicU64,
     }
 
     impl FakeFrames {
         fn new(color: Rgb) -> Self {
-            FakeFrames { color: Mutex::new(color), served: AtomicU64::new(0) }
+            FakeFrames { left: Mutex::new(color), right: Mutex::new(color), served: AtomicU64::new(0) }
         }
 
         fn set(&self, color: Rgb) {
-            *self.color.lock().unwrap() = color;
+            *self.left.lock().unwrap() = color;
+            *self.right.lock().unwrap() = color;
+        }
+
+        fn set_left(&self, color: Rgb) {
+            *self.left.lock().unwrap() = color;
+        }
+
+        fn set_right(&self, color: Rgb) {
+            *self.right.lock().unwrap() = color;
         }
     }
 
     impl FrameSource for Arc<FakeFrames> {
         fn next_frame(&self) -> Result<Frame> {
-            let color = *self.color.lock().unwrap();
-            let pixels: Vec<u8> = (0..16 * 16)
-                .flat_map(|_| [color.r, color.g, color.b, 255])
+            let left = *self.left.lock().unwrap();
+            let right = *self.right.lock().unwrap();
+            let pixels: Vec<u8> = (0..16u32)
+                .flat_map(|_y| {
+                    (0..16u32).flat_map(move |x| {
+                        let c = if x < 8 { left } else { right };
+                        [c.r, c.g, c.b, 255]
+                    })
+                })
                 .collect();
             self.served.fetch_add(1, Ordering::Relaxed);
             Ok(Frame::from_packed_rgba(pixels, 16, 16)?)
@@ -577,15 +658,18 @@ mod tests {
     #[derive(Default)]
     struct FakeSink {
         sent: Vec<LightCommand>,
+        /// Last command accepted per light, so `would_send` can dedupe correctly
+        /// once more than one light is in play.
+        last_by_light: HashMap<LightId, LightCommand>,
         failures: u64,
         snapshots: u64,
         restores: u64,
     }
 
     impl LightSink for Arc<Mutex<FakeSink>> {
-        fn would_send(&self, _light: &LightId, command: LightCommand) -> bool {
+        fn would_send(&self, light: &LightId, command: LightCommand) -> bool {
             let sink = self.lock().unwrap();
-            sink.sent.last().is_none_or(|last| {
+            sink.last_by_light.get(light).is_none_or(|last| {
                 last.color != command.color || last.brightness != command.brightness
             })
         }
@@ -594,7 +678,9 @@ mod tests {
             if !LightSink::would_send(self, light, command) {
                 return Ok(false);
             }
-            self.lock().unwrap().sent.push(command);
+            let mut sink = self.lock().unwrap();
+            sink.sent.push(command);
+            sink.last_by_light.insert(light.clone(), command);
             Ok(true)
         }
 
@@ -663,6 +749,70 @@ mod tests {
     ) -> SyncLoop {
         SyncLoop::new(
             &config(max_commands_per_sec),
+            Box::new(Arc::clone(frames)),
+            Box::new(Arc::clone(sink)),
+        )
+        .unwrap()
+    }
+
+    /// Two zones, each covering half the frame and mapped to its own light, so
+    /// a test can drive them through independent samples with `set_left` /
+    /// `set_right` while still exercising one shared global budget.
+    fn two_zone_config(max_commands_per_sec: f32, light_a_rate: f32, light_b_rate: f32) -> Config {
+        Config {
+            mqtt: MqttConfig {
+                name: "t".into(),
+                broker: "localhost".into(),
+                port: 1883,
+                user: None,
+                password: None,
+            },
+            lights: vec![
+                LightSpec {
+                    service: LightService::Zigbee2MQTT,
+                    light_name: LightId::new("a"),
+                    brightness: 1.0,
+                    is_group: false,
+                    max_updates_per_sec: Some(light_a_rate),
+                    fallback_state: None,
+                },
+                LightSpec {
+                    service: LightService::Zigbee2MQTT,
+                    light_name: LightId::new("b"),
+                    brightness: 1.0,
+                    is_group: false,
+                    max_updates_per_sec: Some(light_b_rate),
+                    fallback_state: None,
+                },
+            ],
+            zones: vec![
+                Zone { name: "left".into(), x: 0, y: 0, width: 8, height: 16, light_name: LightId::new("a") },
+                Zone { name: "right".into(), x: 8, y: 0, width: 8, height: 16, light_name: LightId::new("b") },
+            ],
+            downsample_factor: 1,
+            performance: PerformanceConfig {
+                max_fps: 60,
+                max_delay: 500,
+                refresh_threshold: 10,
+                percent_thread_work: 0.25,
+                fps_reporting: 3600,
+                max_commands_per_sec,
+            },
+            on_stop: StopPolicy::Restore,
+            instance: None,
+            intensity: Intensity::Normal,
+        }
+    }
+
+    fn two_zone_session(
+        frames: &Arc<FakeFrames>,
+        sink: &Arc<Mutex<FakeSink>>,
+        max_commands_per_sec: f32,
+        light_a_rate: f32,
+        light_b_rate: f32,
+    ) -> SyncLoop {
+        SyncLoop::new(
+            &two_zone_config(max_commands_per_sec, light_a_rate, light_b_rate),
             Box::new(Arc::clone(frames)),
             Box::new(Arc::clone(sink)),
         )
@@ -738,6 +888,96 @@ mod tests {
         assert!(loop_.commands_deferred > 0, "deferrals should be counted");
     }
 
+    /// The whole point of the fix: a scene change that moves two zones on the
+    /// same frame must not let one reach its light while the other waits for a
+    /// later tick. With only one global token available, neither goes out;
+    /// once a second token has accrued, both go out on the very next tick.
+    #[test]
+    fn two_zones_changing_together_are_sent_together_or_not_at_all() {
+        let frames = Arc::new(FakeFrames::new(Rgb::new(200, 100, 50)));
+        let sink = Arc::new(Mutex::new(FakeSink::default()));
+        // Capacity is two tokens at this rate, but only one is available up
+        // front, so the very first tick already exercises "not enough for the
+        // whole group yet".
+        let mut loop_ = two_zone_session(&frames, &sink, 100.0, 100.0, 100.0);
+
+        loop_.tick().unwrap();
+
+        assert_eq!(sink.lock().unwrap().sent.len(), 0, "neither zone should send with only one token");
+        assert_eq!(loop_.commands_deferred, 2);
+        assert!(
+            loop_.zones.iter().all(|zone| zone.previous_sample.is_none()),
+            "a deferred change must leave previous_sample untouched"
+        );
+
+        thread::sleep(Duration::from_millis(15));
+        loop_.tick().unwrap();
+
+        assert_eq!(
+            sink.lock().unwrap().sent.len(),
+            2,
+            "both zones should go out together once the group fits in the budget"
+        );
+    }
+
+    /// Regression guard: once the global budget already holds enough tokens for
+    /// the whole group, same-frame changes are not held back waiting for
+    /// anything further — they go out together on the first tick that sees
+    /// them.
+    #[test]
+    fn two_zones_changing_together_send_in_one_frame_with_plentiful_budget() {
+        let frames = Arc::new(FakeFrames::new(Rgb::new(10, 10, 10)));
+        let sink = Arc::new(Mutex::new(FakeSink::default()));
+        let mut loop_ = two_zone_session(&frames, &sink, 100.0, 100.0, 100.0);
+
+        // Let the global budget reach its full two-token capacity before the
+        // tick under test.
+        thread::sleep(Duration::from_millis(25));
+        loop_.tick().unwrap();
+
+        assert_eq!(sink.lock().unwrap().sent.len(), 2, "both zones should send in the same frame");
+        assert_eq!(loop_.commands_deferred, 0);
+    }
+
+    /// A zone whose own light is throttled hard must not hold back a zone
+    /// sharing nothing but the same frame: the starved zone is deferred on its
+    /// own, and the healthy zone still goes out. This is the fallback to the
+    /// all-or-nothing rule above, chosen so one congested or backed-off light
+    /// cannot indefinitely stall every other zone.
+    #[test]
+    fn a_zone_starved_of_its_own_budget_does_not_hold_back_a_healthy_zone() {
+        let frames = Arc::new(FakeFrames::new(Rgb::new(10, 10, 10)));
+        let sink = Arc::new(Mutex::new(FakeSink::default()));
+        // Zone A's light is throttled to 1/s; zone B's is not. The global
+        // budget is generous so it is never the bottleneck here.
+        let mut loop_ = two_zone_session(&frames, &sink, 100.0, 1.0, 100.0);
+
+        // Reach full global capacity, then send the unconditional first sample
+        // for both zones together, spending both zones' own tokens too.
+        thread::sleep(Duration::from_millis(25));
+        loop_.tick().unwrap();
+        assert_eq!(sink.lock().unwrap().sent.len(), 2);
+
+        // Give the global budget (100/s) just enough time to recover a token;
+        // zone A's own budget (1/s) is still empty over the same span.
+        thread::sleep(Duration::from_millis(15));
+        frames.set(Rgb::new(220, 30, 30));
+        loop_.tick().unwrap();
+
+        assert_eq!(
+            sink.lock().unwrap().sent.len(),
+            3,
+            "zone B's change should go out even though zone A's own budget is empty"
+        );
+        assert_eq!(loop_.commands_deferred, 1, "zone A is deferred on its own, not as part of the group");
+        assert_eq!(
+            loop_.zones[0].previous_sample,
+            Some(Rgb::new(10, 10, 10)),
+            "zone A's change stays pending"
+        );
+        assert_eq!(loop_.zones[1].previous_sample, Some(Rgb::new(220, 30, 30)));
+    }
+
     #[test]
     fn a_session_snapshots_on_entry_and_restores_on_exit() {
         let frames = Arc::new(FakeFrames::new(Rgb::new(10, 10, 10)));
@@ -783,6 +1023,18 @@ mod tests {
         assert!(budget.has_token());
         budget.take();
         assert!(!budget.has_token());
+    }
+
+    #[test]
+    fn has_tokens_requires_the_whole_amount_at_once() {
+        // Fast refill, so capacity (clamped to 2.0) is reached quickly.
+        let mut budget = CommandBudget::new(1000.0);
+
+        assert!(!budget.has_tokens(2), "only the initial single token is available yet");
+        assert!(budget.has_tokens(1));
+
+        thread::sleep(Duration::from_millis(5));
+        assert!(budget.has_tokens(2), "capacity is two tokens once refilled");
     }
 
     #[test]
