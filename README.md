@@ -155,7 +155,7 @@ performance:
 - Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps, with a cut gate that snaps big jumps (cuts, explosions) even faster without changing the pacing of small, gradual changes. Tunable via `intensity` (`slow`, `normal`, `extreme`, or a custom curve).
 - Adaptive framerate driven by the light network itself. Zigbee2MQTT's log stream is monitored for delivery failures, and the send rate backs off whenever the mesh reports congestion. `percent_thread_work` remains as a secondary CPU guard (e.g. 10fps = 100ms thread time; 0.25 means 25ms of capture time will throttle the framerate).
   - Earlier versions throttled on CPU work time alone. That only ever worked on X11, where a screen grab is genuinely expensive; on Wayland the capture is a cheap buffer read, so the loop never backed off and flooded the Zigbee mesh instead.
-- `max_commands_per_sec` puts a hard ceiling on commands reaching the mesh, independent of framerate. Zone updates that exceed the budget stay pending rather than being dropped.
+- `max_commands_per_sec` puts a hard ceiling on commands reaching the mesh, independent of framerate. Zone updates that exceed the budget stay pending rather than being dropped, and zones that change on the same frame are sent together or held together, so a synchronized scene change doesn't reach one light noticeably before another.
 - Rotating log files, and the Wayland monitor picker only appears once — the portal's restore token is persisted.
 - Multiple machines can sync against one broker; each is namespaced by its hostname unless `instance` says otherwise.
 
