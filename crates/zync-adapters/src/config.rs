@@ -280,6 +280,23 @@ mod tests {
         assert!(config.validate().is_ok(), "example must be a usable configuration");
     }
 
+    /// The README documents `custom:` as a nested map. serde_yaml's default enum
+    /// encoding would demand a `!custom` tag instead, which nobody would guess.
+    #[test]
+    fn a_custom_intensity_parses_from_yaml_as_a_nested_map() {
+        use zync_core::domain::Intensity;
+
+        let yaml = "custom:\n  softness: 0.4\n  cut_midpoint: 0.4\n  cut_steepness: 14.0\n  min_transition: 0.1\n  max_transition: 1.0\n";
+        let intensity: Intensity = serde_yaml::from_str(yaml).expect("nested map must parse");
+        let Intensity::Custom(curve) = intensity else {
+            panic!("expected a custom curve, got {intensity:?}");
+        };
+        assert_eq!(curve.min_transition, 0.1);
+
+        let preset: Intensity = serde_yaml::from_str("extreme").expect("preset must parse");
+        assert_eq!(preset, Intensity::Extreme);
+    }
+
     #[test]
     fn a_configured_instance_name_wins() {
         assert_eq!(resolve_instance(Some("gaming-rig")), "gaming-rig");

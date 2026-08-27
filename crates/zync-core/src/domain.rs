@@ -230,8 +230,12 @@ impl TransitionCurve {
 /// How aggressively big colour jumps are shortened, from a gentle "slow" fade
 /// through the default to "extreme", which snaps almost instantly on a cut.
 /// `Custom` takes a hand-tuned curve for anyone the presets don't fit.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+///
+/// Deserialised by hand rather than derived: serde's default enum encoding is
+/// format-specific, and serde_yaml spells a data-carrying variant as a `!custom`
+/// tag, which is not something anyone would guess from the example config. See
+/// [`IntensityRepr`] for the shapes accepted.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Intensity {
     /// Gentle fades throughout; suits film and ambient content where even cuts
     /// should ease rather than snap.
@@ -243,6 +247,37 @@ pub enum Intensity {
     Extreme,
     /// A hand-tuned curve, given as its five parameters directly.
     Custom(TransitionCurve),
+}
+
+/// The on-disk shapes for [`Intensity`]: a preset name (`normal`), a map with a
+/// single `custom` key holding the curve, or the curve's fields directly.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IntensityRepr {
+    Preset(Preset),
+    Wrapped { custom: TransitionCurve },
+    Bare(TransitionCurve),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Preset {
+    Slow,
+    Normal,
+    Extreme,
+}
+
+impl<'de> Deserialize<'de> for Intensity {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match IntensityRepr::deserialize(deserializer)? {
+            IntensityRepr::Preset(Preset::Slow) => Intensity::Slow,
+            IntensityRepr::Preset(Preset::Normal) => Intensity::Normal,
+            IntensityRepr::Preset(Preset::Extreme) => Intensity::Extreme,
+            IntensityRepr::Wrapped { custom } | IntensityRepr::Bare(custom) => {
+                Intensity::Custom(custom)
+            }
+        })
+    }
 }
 
 impl Intensity {
