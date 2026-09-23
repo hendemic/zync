@@ -33,13 +33,18 @@ zync start           # start syncing in the background, and give the terminal ba
 zync status          # is it running?
 zync logs -f         # follow what it is doing
 zync stop            # stop syncing and fade the lights back
+zync config          # edit the config in your editor, and check what you saved
 
 zync start -f        # run in this terminal instead, logging as it goes
+zync config --check  # check the config without opening an editor
+zync config --path   # print where the config lives
 ```
 
 `zync start` detaches into its own session, so it keeps running after you close the shell. Use `-f`/`--foreground` when you want to watch it directly.
 
 On first run `zync start` creates a commented config at `~/.config/zync/config.yaml` and exits so you can fill in your broker and lights. Config problems are reported by `zync start` itself rather than only landing in a log.
+
+`zync config` opens that file in `$VISUAL`, `$EDITOR`, or `vi`, and says whether what you saved is usable — including on a fresh install, where it writes the commented example first so there is something to edit. The config is only read when syncing starts, so a running service keeps the settings it started with until the next `zync start`.
 
 Stopping — with `zync stop`, with Ctrl-C on a foreground run, or with `kill` on the service — fades the lights back over five seconds to whatever they were showing before syncing started. `on_stop` in the config chooses that behaviour.
 
@@ -56,11 +61,11 @@ The instance name defaults to your hostname, so pointing two machines at the sam
 Set `instance:` in the config only if you want a name other than the hostname.
 
 ### Files
-Paths below are the Linux ones. macOS has no XDG state directory, so both the config and the state land under `~/Library/Application Support/zync/` instead. `zync status` prints the resolved config and log paths for the machine you are on.
+Paths below are the Linux ones. macOS has no XDG state directory, so both the config and the state land under `~/Library/Application Support/zync/` instead. `zync status` prints the resolved config and log paths for the machine you are on, and `zync config --path` prints the config path on its own.
 
 | Path | Owner |
 |---|---|
-| `~/.config/zync/config.yaml` | you |
+| `~/.config/zync/config.yaml` | you — `zync config` opens it in your editor |
 | `~/.local/state/zync/state.json` | the app — currently the screencast portal's restore token (Linux only) |
 | `~/.local/state/zync/zync.pid` | the app — the running service, so `status` and `stop` can find it |
 | `~/.local/state/zync/logs/zync.<date>.log` | the app — daily rotation, seven files kept. This is what `zync logs` reads |
@@ -180,10 +185,20 @@ zync            the binary: logging, CLI
 
 ### Other ideas in consideration
 - Hue Gradient and other "segment" lights. Requires reworking the zone-to-light mapping into a many-to-one relationship of zones to a light's segments.
-- `zync config` and `zync doctor` subcommands.
+- `zync doctor` subcommand.
 - A systemd user unit, so syncing can start with the session.
 
 ## Troubleshooting
+
+### Checking the config
+
+```
+zync config          # edit it, and hear whether what you saved is usable
+zync config --check  # check what is already there, without opening an editor
+zync config --path   # print the path, for opening it some other way
+```
+
+`--check` exits non-zero when the config cannot be used, so it can gate a script. A parse error names the line and column where it gave up; a config that parses but asks for something impossible — a zone pointing at a light that is not defined, say — is reported as that instead.
 
 ### Checking what the capture is doing
 

@@ -11,6 +11,7 @@ use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 mod cli;
 mod color;
+mod ops;
 mod service;
 
 use cli::Logging;
