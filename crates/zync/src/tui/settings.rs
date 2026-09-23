@@ -1419,3 +1419,872 @@ fn decimal(text: &str) -> Result<f32, String> {
     text.parse()
         .map_err(|_| format!("{text:?} is not a number."))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+    use std::path::PathBuf;
+    use zync_core::domain::MqttConfig;
+
+    /// Two lights and two zones, which is enough surface for the delete and
+    /// light-picker cases without every test having to build its own.
+    fn config() -> Config {
+        Config {
+            mqtt: MqttConfig {
+                name: "t".into(),
+                broker: "localhost".into(),
+                port: 1883,
+                user: None,
+                password: Some("hunter2".into()),
+            },
+            lights: vec![
+                LightSpec {
+                    service: LightService::Zigbee2MQTT,
+                    light_name: LightId::new("lamp1"),
+                    brightness: 0.8,
+                    is_group: false,
+                    max_updates_per_sec: None,
+                    fallback_state: None,
+                },
+                LightSpec {
+                    service: LightService::Zigbee2MQTT,
+                    light_name: LightId::new("lamp2"),
+                    brightness: 0.6,
+                    is_group: false,
+                    max_updates_per_sec: None,
+                    fallback_state: None,
+                },
+            ],
+            zones: vec![
+                Zone {
+                    name: "zone1".into(),
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                    light_name: LightId::new("lamp1"),
+                },
+                Zone {
+                    name: "zone2".into(),
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                    light_name: LightId::new("lamp2"),
+                },
+            ],
+            downsample_factor: 1,
+            performance: PerformanceConfig {
+                max_fps: 60,
+                max_delay: 500,
+                refresh_threshold: 10,
+                percent_thread_work: 0.25,
+                fps_reporting: 3600,
+                max_commands_per_sec: 20.0,
+            },
+            on_stop: StopPolicy::Restore,
+            instance: None,
+            intensity: Intensity::Normal,
+        }
+    }
+
+    fn loaded_settings() -> Settings {
+        let mut s = Settings::default();
+        s.loaded(Ok(config()));
+        s
+    }
+
+    fn place(s: &mut Settings, field: Field) {
+        s.cursor = s.row_of(field).expect("field is on the form");
+    }
+
+    // --- Loading and navigation ---------------------------------------
+
+    #[test]
+    fn loading_lands_the_cursor_on_the_first_field() {
+        let s = loaded_settings();
+        assert_eq!(s.selected_field(), Some(Field::Mqtt(MqttField::Name)));
+    }
+
+    #[test]
+    fn up_and_down_skip_headings() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Password));
+
+        s.on_key(Key::Down);
+        assert_eq!(s.selected_field(), Some(Field::Instance));
+
+        s.on_key(Key::Up);
+        assert_eq!(s.selected_field(), Some(Field::Mqtt(MqttField::Password)));
+    }
+
+    #[test]
+    fn j_and_k_skip_headings_like_the_arrow_keys() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Password));
+
+        s.on_key(Key::Char('j'));
+        assert_eq!(s.selected_field(), Some(Field::Instance));
+
+        s.on_key(Key::Char('k'));
+        assert_eq!(s.selected_field(), Some(Field::Mqtt(MqttField::Password)));
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_first_and_last_selectable_rows() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Instance);
+
+        s.on_key(Key::Home);
+        assert_eq!(s.selected_field(), Some(Field::Mqtt(MqttField::Name)));
+
+        s.on_key(Key::End);
+        assert!(matches!(&s.rows()[s.cursor()], Row::Add { group: Group::Zone, .. }));
+    }
+
+    #[test]
+    fn page_down_moves_by_the_window_height_and_never_lands_on_a_heading() {
+        let mut s = loaded_settings();
+        s.resize(5);
+
+        s.on_key(Key::PageDown);
+
+        // Cursor starts on mqtt.name (row 1); five rows down lands on the
+        // Behaviour heading, which settle() pushes forward onto instance.
+        assert_eq!(s.selected_field(), Some(Field::Instance));
+        assert!(!matches!(&s.rows()[s.cursor()], Row::Heading { .. }));
+    }
+
+    #[test]
+    fn resize_to_a_small_height_keeps_the_cursor_on_screen() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Perf(PerfField::MaxCommandsPerSec));
+
+        s.resize(3);
+
+        assert!(s.scroll() <= s.cursor());
+        assert!(s.cursor() < s.scroll() + 3);
+    }
+
+    // --- Text edit -------------------------------------------------------
+
+    #[test]
+    fn enter_on_broker_opens_a_buffer_with_the_cursor_at_the_end() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+
+        s.on_key(Key::Enter);
+
+        let edit = s.editing().unwrap();
+        assert_eq!(edit.field, Field::Mqtt(MqttField::Broker));
+        assert_eq!(edit.buffer, "localhost");
+        assert_eq!(edit.cursor, "localhost".chars().count());
+    }
+
+    #[test]
+    fn hotkey_letters_are_inserted_rather_than_acted_on_while_editing() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+        s.on_key(Key::Enter);
+
+        for ch in ['s', 'a', 'd', 'q', 'j', 'k', 'o'] {
+            assert_eq!(s.on_key(Key::Char(ch)), None);
+        }
+
+        assert!(s.editing().is_some());
+        assert_eq!(s.editing().unwrap().buffer, "localhostsadqjko");
+        assert_eq!(s.text(Field::Mqtt(MqttField::Broker)), "localhost");
+    }
+
+    #[test]
+    fn backspace_removes_the_character_before_the_cursor() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+        s.on_key(Key::Enter);
+
+        s.on_key(Key::Backspace);
+
+        assert_eq!(s.editing().unwrap().buffer, "localhos");
+    }
+
+    #[test]
+    fn left_and_right_move_the_edit_cursor() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+        s.on_key(Key::Enter);
+
+        s.on_key(Key::Left);
+        s.on_key(Key::Left);
+        assert_eq!(s.editing().unwrap().cursor, "localhost".chars().count() - 2);
+
+        s.on_key(Key::Right);
+        assert_eq!(s.editing().unwrap().cursor, "localhost".chars().count() - 1);
+    }
+
+    #[test]
+    fn home_and_end_move_the_edit_cursor_to_the_ends_of_the_buffer() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+        s.on_key(Key::Enter);
+
+        s.on_key(Key::Home);
+        assert_eq!(s.editing().unwrap().cursor, 0);
+
+        s.on_key(Key::End);
+        assert_eq!(s.editing().unwrap().cursor, "localhost".chars().count());
+    }
+
+    #[test]
+    fn enter_commits_the_buffer_into_the_config() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "example.com".to_owned();
+
+        s.on_key(Key::Enter);
+
+        assert!(s.editing().is_none());
+        assert_eq!(s.text(Field::Mqtt(MqttField::Broker)), "example.com");
+    }
+
+    #[test]
+    fn esc_cancels_the_edit_and_leaves_the_config_unchanged() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "example.com".to_owned();
+
+        s.on_key(Key::Esc);
+
+        assert!(s.editing().is_none());
+        assert_eq!(s.text(Field::Mqtt(MqttField::Broker)), "localhost");
+    }
+
+    // --- Number edit -------------------------------------------------------
+
+    #[test]
+    fn committing_a_non_numeric_port_stays_in_edit_mode_with_a_problem() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Port));
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "abc".to_owned();
+
+        s.on_key(Key::Enter);
+
+        assert!(s.editing().is_some());
+        assert!(s.problem);
+        assert!(s.note.contains("not a whole number"));
+    }
+
+    #[test]
+    fn committing_a_port_above_u16_range_reports_out_of_range() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Port));
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "70000".to_owned();
+
+        s.on_key(Key::Enter);
+
+        assert!(s.editing().is_some());
+        assert!(s.problem);
+        assert!(s.note.contains("outside the range"));
+    }
+
+    #[test]
+    fn committing_a_valid_port_updates_the_config() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Port));
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "1884".to_owned();
+
+        s.on_key(Key::Enter);
+
+        assert!(s.editing().is_none());
+        assert!(!s.problem);
+        assert_eq!(s.text(Field::Mqtt(MqttField::Port)), "1884");
+    }
+
+    #[test]
+    fn a_float_field_accepts_a_decimal_and_rejects_non_numeric_text() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Perf(PerfField::PercentThreadWork));
+
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "0.5".to_owned();
+        s.on_key(Key::Enter);
+        assert!(s.editing().is_none());
+        assert_eq!(s.text(Field::Perf(PerfField::PercentThreadWork)), "0.5");
+
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "x".to_owned();
+        s.on_key(Key::Enter);
+        assert!(s.editing().is_some());
+        assert!(s.problem);
+    }
+
+    // --- Optional fields -----------------------------------------------
+
+    #[test]
+    fn committing_an_empty_buffer_on_an_optional_text_field_unsets_it() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::User));
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = String::new();
+
+        s.on_key(Key::Enter);
+
+        assert_eq!(s.text(Field::Mqtt(MqttField::User)), "");
+        assert_eq!(s.display(Field::Mqtt(MqttField::User)), "(unset)");
+    }
+
+    #[test]
+    fn instance_round_trips_through_being_set_and_cleared() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Instance);
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "porch".to_owned();
+        s.on_key(Key::Enter);
+        assert_eq!(s.text(Field::Instance), "porch");
+
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = String::new();
+        s.on_key(Key::Enter);
+
+        assert_eq!(s.display(Field::Instance), "(unset)");
+    }
+
+    // --- Secret --------------------------------------------------------
+
+    #[test]
+    fn a_set_password_is_masked_in_display_but_not_in_its_edit_buffer() {
+        let s = loaded_settings();
+
+        assert_eq!(s.display(Field::Mqtt(MqttField::Password)), MASK);
+        assert_eq!(s.text(Field::Mqtt(MqttField::Password)), "hunter2");
+    }
+
+    // --- Choices ---------------------------------------------------------
+
+    #[test]
+    fn left_and_right_cycle_on_stop_through_all_policies_and_wrap() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::OnStop);
+        assert_eq!(s.text(Field::OnStop), "restore");
+
+        s.on_key(Key::Right);
+        assert_eq!(s.text(Field::OnStop), "default");
+        s.on_key(Key::Right);
+        assert_eq!(s.text(Field::OnStop), "off");
+        s.on_key(Key::Right);
+        assert_eq!(s.text(Field::OnStop), "hold");
+        s.on_key(Key::Right);
+        assert_eq!(s.text(Field::OnStop), "restore");
+
+        s.on_key(Key::Left);
+        assert_eq!(s.text(Field::OnStop), "hold");
+    }
+
+    #[test]
+    fn enter_and_space_cycle_a_choice_forward() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::OnStop);
+
+        s.on_key(Key::Enter);
+        assert_eq!(s.text(Field::OnStop), "default");
+
+        s.on_key(Key::Char(' '));
+        assert_eq!(s.text(Field::OnStop), "off");
+    }
+
+    #[test]
+    fn left_and_right_do_nothing_on_a_text_field() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+
+        s.on_key(Key::Right);
+        s.on_key(Key::Left);
+
+        assert_eq!(s.text(Field::Mqtt(MqttField::Broker)), "localhost");
+        assert!(s.editing().is_none());
+    }
+
+    // --- Intensity ---------------------------------------------------------
+
+    #[test]
+    fn cycling_past_extreme_turns_the_intensity_custom_with_extremes_curve() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Intensity);
+
+        s.on_key(Key::Right); // normal -> extreme
+        assert_eq!(s.text(Field::Intensity), "extreme");
+        s.on_key(Key::Right); // extreme -> custom
+        assert_eq!(s.text(Field::Intensity), "custom");
+
+        let index = s.row_of(Field::Intensity).unwrap();
+        let curve_fields: Vec<Field> =
+            (index + 1..index + 6).map(|i| s.rows()[i].field().unwrap()).collect();
+        assert_eq!(curve_fields, CURVE_FIELDS.map(Field::Curve).to_vec());
+
+        let expected = Intensity::Extreme.curve();
+        for which in CURVE_FIELDS {
+            assert_eq!(s.text(Field::Curve(which)), number(curve_value(expected, which)));
+        }
+    }
+
+    #[test]
+    fn editing_a_curve_value_changes_only_that_number() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Intensity);
+        s.on_key(Key::Right); // extreme
+        s.on_key(Key::Right); // custom, seeded from extreme's curve
+        let before = Intensity::Extreme.curve();
+
+        place(&mut s, Field::Curve(CurveField::MinTransition));
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "0.3".to_owned();
+        s.on_key(Key::Enter);
+
+        assert_eq!(s.text(Field::Curve(CurveField::MinTransition)), "0.3");
+        for which in
+            [CurveField::Softness, CurveField::CutMidpoint, CurveField::CutSteepness, CurveField::MaxTransition]
+        {
+            assert_eq!(s.text(Field::Curve(which)), number(curve_value(before, which)));
+        }
+    }
+
+    #[test]
+    fn cycling_back_to_a_preset_removes_the_curve_rows() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Intensity);
+        s.on_key(Key::Right); // extreme
+        s.on_key(Key::Right); // custom
+        assert!(s.row_of(Field::Curve(CurveField::Softness)).is_some());
+
+        s.on_key(Key::Left); // back to extreme
+
+        assert_eq!(s.text(Field::Intensity), "extreme");
+        assert!(s.row_of(Field::Curve(CurveField::Softness)).is_none());
+    }
+
+    // --- Toggle ----------------------------------------------------------
+
+    #[test]
+    fn enter_on_is_group_flips_it() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Light(0, LightField::IsGroup));
+        assert_eq!(s.text(Field::Light(0, LightField::IsGroup)), "false");
+
+        s.on_key(Key::Enter);
+
+        assert_eq!(s.text(Field::Light(0, LightField::IsGroup)), "true");
+    }
+
+    // --- Zone light picker -------------------------------------------------
+
+    #[test]
+    fn left_and_right_cycle_a_zones_light_through_the_configured_lights() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Zone(0, ZoneField::Light));
+        assert_eq!(s.display(Field::Zone(0, ZoneField::Light)), "lamp1");
+
+        s.on_key(Key::Right);
+        assert_eq!(s.display(Field::Zone(0, ZoneField::Light)), "lamp2");
+        s.on_key(Key::Right);
+        assert_eq!(s.display(Field::Zone(0, ZoneField::Light)), "lamp1");
+
+        s.on_key(Key::Left);
+        assert_eq!(s.display(Field::Zone(0, ZoneField::Light)), "lamp2");
+    }
+
+    #[test]
+    fn a_zone_pointing_at_a_missing_light_says_so_and_cycling_lands_on_a_real_one() {
+        let mut c = config();
+        c.zones[0].light_name = LightId::new("ghost");
+        let mut s = Settings::default();
+        s.loaded(Ok(c));
+        place(&mut s, Field::Zone(0, ZoneField::Light));
+        assert_eq!(s.display(Field::Zone(0, ZoneField::Light)), "ghost — no such light");
+
+        s.on_key(Key::Right);
+
+        assert_eq!(s.display(Field::Zone(0, ZoneField::Light)), "lamp1");
+    }
+
+    #[test]
+    fn cycling_a_zones_light_with_no_lights_configured_reports_a_problem() {
+        let mut c = config();
+        c.lights.clear();
+        let mut s = Settings::default();
+        s.loaded(Ok(c));
+        place(&mut s, Field::Zone(0, ZoneField::Light));
+
+        s.on_key(Key::Right);
+
+        assert!(s.problem);
+        assert!(s.note.contains("no lights"));
+    }
+
+    // --- Add -------------------------------------------------------------
+
+    #[test]
+    fn a_on_a_light_row_appends_a_new_light_and_selects_its_name() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Light(0, LightField::Name));
+
+        s.on_key(Key::Char('a'));
+
+        assert_eq!(s.selected_field(), Some(Field::Light(2, LightField::Name)));
+        assert_eq!(s.text(Field::Light(2, LightField::Name)), NEW_LIGHT_NAME);
+    }
+
+    #[test]
+    fn a_on_the_add_a_zone_row_appends_a_zone_pointing_at_the_first_light() {
+        let mut s = loaded_settings();
+        s.cursor = s.row_of_add(Group::Zone).unwrap();
+
+        s.on_key(Key::Char('a'));
+
+        assert_eq!(s.selected_field(), Some(Field::Zone(2, ZoneField::Name)));
+        assert_eq!(s.display(Field::Zone(2, ZoneField::Light)), "lamp1");
+    }
+
+    #[test]
+    fn enter_on_the_add_a_zone_row_also_appends_a_zone() {
+        let mut s = loaded_settings();
+        s.cursor = s.row_of_add(Group::Zone).unwrap();
+
+        s.on_key(Key::Enter);
+
+        assert_eq!(s.selected_field(), Some(Field::Zone(2, ZoneField::Name)));
+    }
+
+    #[test]
+    fn a_outside_lights_or_zones_only_sets_a_note() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+
+        s.on_key(Key::Char('a'));
+
+        assert_eq!(s.text(Field::Mqtt(MqttField::Broker)), "localhost");
+        assert!(s.row_of(Field::Light(2, LightField::Name)).is_none());
+        assert!(s.note.contains("Press a inside"));
+    }
+
+    // --- Delete ----------------------------------------------------------
+
+    #[test]
+    fn d_once_asks_for_confirmation_without_deleting() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Light(0, LightField::Name));
+
+        s.on_key(Key::Char('d'));
+
+        assert!(s.problem);
+        assert!(s.note.contains("Press d again"));
+        assert_eq!(s.text(Field::Light(0, LightField::Name)), "lamp1");
+        assert!(s.row_of(Field::Light(1, LightField::Name)).is_some());
+    }
+
+    #[test]
+    fn d_twice_deletes_the_light_under_the_cursor() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Light(0, LightField::Name));
+
+        s.on_key(Key::Char('d'));
+        s.on_key(Key::Char('d'));
+
+        assert_eq!(s.text(Field::Light(0, LightField::Name)), "lamp2");
+        assert!(s.row_of(Field::Light(1, LightField::Name)).is_none());
+    }
+
+    #[test]
+    fn a_different_key_between_the_two_ds_cancels_the_delete() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Light(0, LightField::Name));
+
+        s.on_key(Key::Char('d'));
+        s.on_key(Key::Down); // still within the same light's fields
+        s.on_key(Key::Char('d')); // asks again rather than deleting
+
+        assert!(s.problem);
+        assert!(s.note.contains("Press d again"));
+        assert_eq!(s.text(Field::Light(0, LightField::Name)), "lamp1");
+        assert!(s.row_of(Field::Light(1, LightField::Name)).is_some());
+    }
+
+    #[test]
+    fn deleting_the_last_zone_leaves_the_cursor_on_add_a_zone() {
+        let mut c = config();
+        c.zones.remove(1);
+        let mut s = Settings::default();
+        s.loaded(Ok(c));
+        place(&mut s, Field::Zone(0, ZoneField::Name));
+
+        s.on_key(Key::Char('d'));
+        s.on_key(Key::Char('d'));
+
+        assert!(matches!(&s.rows()[s.cursor()], Row::Add { group: Group::Zone, .. }));
+    }
+
+    // --- Dirty and leave ---------------------------------------------------
+
+    #[test]
+    fn a_freshly_loaded_config_is_not_dirty() {
+        assert!(!loaded_settings().dirty());
+    }
+
+    fn edit_instance_to_porch(s: &mut Settings) {
+        place(s, Field::Instance);
+        s.on_key(Key::Enter);
+        s.edit.as_mut().unwrap().buffer = "porch".to_owned();
+        s.on_key(Key::Enter);
+    }
+
+    #[test]
+    fn an_edited_config_is_dirty() {
+        let mut s = loaded_settings();
+        edit_instance_to_porch(&mut s);
+
+        assert!(s.dirty());
+    }
+
+    #[test]
+    fn q_when_dirty_asks_for_confirmation_before_leaving() {
+        let mut s = loaded_settings();
+        edit_instance_to_porch(&mut s);
+
+        let action = s.on_key(Key::Char('q'));
+
+        assert_eq!(action, None);
+        assert!(s.note.contains("Unsaved changes"));
+    }
+
+    #[test]
+    fn a_second_q_leaves_discarding_the_changes() {
+        let mut s = loaded_settings();
+        edit_instance_to_porch(&mut s);
+        s.on_key(Key::Char('q'));
+
+        let action = s.on_key(Key::Char('q'));
+
+        assert_eq!(action, Some(Action::Leave));
+    }
+
+    #[test]
+    fn a_different_key_between_two_qs_cancels_the_pending_leave() {
+        let mut s = loaded_settings();
+        edit_instance_to_porch(&mut s);
+        s.on_key(Key::Char('q'));
+        s.on_key(Key::Down);
+
+        let action = s.on_key(Key::Char('q'));
+
+        assert_eq!(action, None);
+        assert!(s.note.contains("Unsaved changes"));
+    }
+
+    #[test]
+    fn q_leaves_at_once_when_there_are_no_unsaved_changes() {
+        let mut s = loaded_settings();
+
+        assert_eq!(s.on_key(Key::Char('q')), Some(Action::Leave));
+    }
+
+    #[test]
+    fn o_when_dirty_asks_for_confirmation_before_opening_the_file() {
+        let mut s = loaded_settings();
+        edit_instance_to_porch(&mut s);
+
+        let action = s.on_key(Key::Char('o'));
+
+        assert_eq!(action, None);
+        assert!(s.note.contains("Unsaved changes"));
+    }
+
+    #[test]
+    fn a_second_o_opens_the_file_discarding_the_changes() {
+        let mut s = loaded_settings();
+        edit_instance_to_porch(&mut s);
+        s.on_key(Key::Char('o'));
+
+        let action = s.on_key(Key::Char('o'));
+
+        assert_eq!(action, Some(Action::Do(Effect::Edit)));
+    }
+
+    #[test]
+    fn o_opens_at_once_when_there_are_no_unsaved_changes() {
+        let mut s = loaded_settings();
+
+        assert_eq!(s.on_key(Key::Char('o')), Some(Action::Do(Effect::Edit)));
+    }
+
+    // --- Save ------------------------------------------------------------
+
+    #[test]
+    fn s_on_a_valid_config_saves_it() {
+        let mut s = loaded_settings();
+        edit_instance_to_porch(&mut s);
+        let expected = {
+            let mut c = config();
+            c.instance = Some("porch".to_owned());
+            c
+        };
+
+        let action = s.on_key(Key::Char('s'));
+
+        match action {
+            Some(Action::Do(Effect::SaveSettings(boxed))) => assert_eq!(*boxed, expected),
+            other => panic!("expected a save effect, got {other:?}"),
+        }
+        assert_eq!(s.note, "Saving…");
+    }
+
+    #[test]
+    fn s_with_a_zone_pointing_at_an_unknown_light_points_at_it_instead_of_saving() {
+        let mut c = config();
+        c.zones[1].light_name = LightId::new("ghost");
+        let mut s = Settings::default();
+        s.loaded(Ok(c));
+
+        let action = s.on_key(Key::Char('s'));
+
+        assert_eq!(action, None);
+        assert!(s.problem);
+        assert_eq!(s.selected_field(), Some(Field::Zone(1, ZoneField::Light)));
+    }
+
+    #[test]
+    fn s_after_deleting_every_light_points_at_add_a_light() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Light(0, LightField::Name));
+        s.on_key(Key::Char('d'));
+        s.on_key(Key::Char('d')); // deletes lamp1; cursor lands on lamp2
+        s.on_key(Key::Char('d'));
+        s.on_key(Key::Char('d')); // deletes lamp2
+
+        let action = s.on_key(Key::Char('s'));
+
+        assert_eq!(action, None);
+        assert!(s.problem);
+        assert!(matches!(&s.rows()[s.cursor()], Row::Add { group: Group::Light, .. }));
+    }
+
+    #[test]
+    fn saved_ok_with_restart_needed_clears_dirty_and_mentions_the_next_start() {
+        let mut s = loaded_settings();
+        edit_instance_to_porch(&mut s);
+        assert!(s.dirty());
+
+        s.saved(Ok(Saved { path: PathBuf::from("/cfg.yaml"), restart_needed: true }));
+
+        assert!(!s.dirty());
+        assert!(s.note.contains("next start"));
+    }
+
+    #[test]
+    fn saved_err_sets_a_problem() {
+        let mut s = loaded_settings();
+
+        s.saved(Err(anyhow!("disk full")));
+
+        assert!(s.problem);
+        assert_eq!(s.note, "disk full");
+    }
+
+    // --- Load failure ------------------------------------------------------
+
+    #[test]
+    fn loaded_err_sets_load_error_and_clears_the_rows() {
+        let mut s = Settings::default();
+
+        s.loaded(Err(anyhow!("bad yaml")));
+
+        assert!(s.load_error.is_some());
+        assert!(s.rows().is_empty());
+        assert!(s.problem);
+    }
+
+    #[test]
+    fn after_a_load_error_only_o_and_q_do_anything() {
+        let mut s = Settings::default();
+        s.loaded(Err(anyhow!("bad yaml")));
+
+        assert_eq!(s.on_key(Key::Down), None);
+        assert_eq!(s.on_key(Key::Char('s')), None);
+        assert_eq!(s.on_key(Key::Char('o')), Some(Action::Do(Effect::Edit)));
+        assert_eq!(s.on_key(Key::Char('q')), Some(Action::Leave));
+    }
+
+    #[test]
+    fn after_a_load_error_esc_also_leaves() {
+        let mut s = Settings::default();
+        s.loaded(Err(anyhow!("bad yaml")));
+
+        assert_eq!(s.on_key(Key::Esc), Some(Action::Leave));
+    }
+
+    // --- Opening -----------------------------------------------------------
+
+    #[test]
+    fn opening_resets_everything_including_a_stale_note() {
+        let mut s = loaded_settings();
+        s.note = "something stale".to_owned();
+        s.problem = true;
+
+        s.opening();
+
+        assert_eq!(s.note, "Loading the config…");
+        assert!(!s.problem);
+        assert!(s.rows().is_empty());
+        assert!(s.load_error.is_none());
+        assert!(!s.dirty());
+    }
+
+    // --- Pure helpers --------------------------------------------------
+
+    #[test]
+    fn next_choice_wraps_forward_and_backward() {
+        assert_eq!(next_choice(Some(0), 4, 1), 1);
+        assert_eq!(next_choice(Some(3), 4, 1), 0);
+        assert_eq!(next_choice(Some(0), 4, -1), 3);
+    }
+
+    #[test]
+    fn next_choice_with_no_current_value_joins_at_the_end_the_move_came_from() {
+        assert_eq!(next_choice(None, 4, 1), 0);
+        assert_eq!(next_choice(None, 4, -1), 3);
+    }
+
+    #[test]
+    fn whole_distinguishes_empty_non_numeric_and_out_of_range_text() {
+        assert_eq!(whole::<u16>(""), Err("This setting needs a whole number.".to_owned()));
+        assert!(whole::<u16>("abc").unwrap_err().contains("not a whole number"));
+        assert!(whole::<u16>("70000").unwrap_err().contains("outside the range"));
+        assert_eq!(whole::<u16>("1884"), Ok(1884));
+    }
+
+    #[test]
+    fn offset_finds_the_byte_boundary_of_a_multi_byte_character() {
+        // "café": c, a, f are one byte each; é is two bytes.
+        assert_eq!(offset("café", 3), 3);
+        assert_eq!(offset("café", 4), 5); // past the end
+    }
+
+    #[test]
+    fn backspace_removes_one_character_even_when_it_spans_multiple_bytes() {
+        let mut s = loaded_settings();
+        place(&mut s, Field::Mqtt(MqttField::Broker));
+        s.on_key(Key::Enter);
+        {
+            let edit = s.edit.as_mut().unwrap();
+            edit.buffer = "café".to_owned();
+            edit.cursor = 4;
+        }
+
+        s.on_key(Key::Backspace);
+
+        assert_eq!(s.editing().unwrap().buffer, "caf");
+    }
+}
