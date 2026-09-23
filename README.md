@@ -28,7 +28,9 @@ Note: Fullscreen apps (games, fullscreen video) are captured on Gnome Wayland be
 ## Usage
 Build with `cargo build --release`; the binary is `zync`.
 
-Running `zync` on its own opens a terminal interface. It shows whether syncing is running, which instance name it registered under, and where the config and log files are; from there `s` starts, `x` stops, `l` follows this session's log, `e` opens the config in your editor, and `q` leaves without stopping anything. `zync ui` is the same thing under a name you can write down. Piped rather than run in a terminal, plain `zync` prints its usage instead.
+Running `zync` on its own opens a terminal interface. It shows whether syncing is running, which instance name it registered under, and where the config and log files are; from there `s` starts, `x` stops, `l` follows this session's log, `e` opens the settings, and `q` leaves without stopping anything. `zync ui` is the same thing under a name you can write down. Piped rather than run in a terminal, plain `zync` prints its usage instead.
+
+`e` opens a form over the config: move with ↑/↓, `Enter` changes the field you are on, ←/→ cycle a choice, `a` and `d` add and remove a light or a zone, and `s` writes the file back with its comments intact. `o` hands the file to your editor from inside the form, which is still the way to reach a light's `fallback_state`.
 
 Everything it does is also a subcommand:
 
