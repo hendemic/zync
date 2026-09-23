@@ -2,7 +2,8 @@
 //!
 //! No I/O and no platform dependencies. Everything here is directly testable.
 
-use serde::Deserialize;
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
@@ -197,7 +198,7 @@ impl Rgb {
 /// `base` alone) for gradual changes and collapses toward 0 (pulling the result
 /// down to `min_transition`) once the distance passes the midpoint, so a cut or
 /// explosion fades out fast without changing the pacing of small changes at all.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TransitionCurve {
     /// Exponent applied to normalised distance in the base falloff.
     pub softness: f32,
@@ -286,6 +287,26 @@ impl<'de> Deserialize<'de> for Intensity {
     }
 }
 
+/// Written by hand for the same reason the [`Deserialize`] impl above is: the
+/// derived encoding would spell a custom curve as a `!custom` tag, which is not
+/// one of the shapes documented in the README. A preset goes out as the bare
+/// name it comes in as, and a curve as the `custom:` map the example config
+/// shows, so a file this writes reads back through [`IntensityRepr`].
+impl Serialize for Intensity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Intensity::Slow => serializer.serialize_str("slow"),
+            Intensity::Normal => serializer.serialize_str("normal"),
+            Intensity::Extreme => serializer.serialize_str("extreme"),
+            Intensity::Custom(curve) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("custom", curve)?;
+                map.end()
+            }
+        }
+    }
+}
+
 impl Intensity {
     /// Resolves a preset (or a custom setting, unchanged) to the curve it drives.
     pub fn curve(&self) -> TransitionCurve {
@@ -361,7 +382,8 @@ impl LightCommand {
 
 /// A light's name in whatever service owns it. Used as the key linking zones,
 /// pacing state, and delivery failures to one another.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(transparent)]
 pub struct LightId(String);
 
 impl LightId {
@@ -381,14 +403,14 @@ impl fmt::Display for LightId {
 }
 
 /// Which service owns a light, and therefore how its commands are addressed.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum LightService {
     Zigbee2MQTT,
     ZHA,
     HueAPI,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LightSpec {
     pub service: LightService,
     pub light_name: LightId,
@@ -398,12 +420,12 @@ pub struct LightSpec {
     #[serde(default)]
     pub is_group: bool,
     /// Overrides the pacing default chosen from `is_group`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_updates_per_sec: Option<f32>,
     /// State to leave this light in when a session ends and its previous state
     /// could not be read back. Passed through to the service verbatim, so any
     /// payload the service accepts works here.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_state: Option<serde_json::Value>,
 }
 
@@ -419,7 +441,7 @@ impl LightSpec {
 
 /// A rectangular region of the screen, in native display pixels, and the light
 /// that follows it.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Zone {
     pub name: String,
     pub x: u32,
@@ -510,7 +532,7 @@ impl ZoneSampler {
 }
 
 /// What to do with the lights when a session ends.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopPolicy {
     /// Put each light back the way it was before the session started, falling
@@ -525,12 +547,14 @@ pub enum StopPolicy {
     Hold,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MqttConfig {
     pub name: String,
     pub broker: String,
     pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 }
 
@@ -538,7 +562,7 @@ fn default_max_commands_per_sec() -> f32 {
     6.0
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PerformanceConfig {
     pub max_fps: u64,
     pub max_delay: u64,
@@ -551,7 +575,7 @@ pub struct PerformanceConfig {
     pub max_commands_per_sec: f32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Config {
     pub mqtt: MqttConfig,
     pub lights: Vec<LightSpec>,
@@ -566,7 +590,7 @@ pub struct Config {
     ///
     /// Left unset here on purpose: resolving the default means asking the system
     /// for its hostname, which is an adapter's job, not the model's.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
     /// How aggressively big colour jumps are shortened. Defaults to a balanced
     /// preset so configs written before this field existed keep loading.
@@ -940,6 +964,36 @@ mod tests {
                 max_transition: 1.2,
             })
         );
+    }
+
+    /// The written shape has to be one the reader accepts, or a config saved
+    /// from the interface would not load again.
+    #[test]
+    fn intensity_round_trips_through_both_of_its_shapes() {
+        let custom = Intensity::Custom(TransitionCurve {
+            softness: 0.5,
+            cut_midpoint: 0.5,
+            cut_steepness: 12.0,
+            min_transition: 0.05,
+            max_transition: 1.2,
+        });
+
+        for intensity in [Intensity::Slow, Intensity::Normal, Intensity::Extreme, custom] {
+            let encoded = serde_json::to_string(&intensity).unwrap();
+            let decoded: Intensity = serde_json::from_str(&encoded).unwrap();
+
+            assert_eq!(decoded, intensity, "{encoded} should read back unchanged");
+        }
+    }
+
+    /// A preset is a bare name and a curve is a `custom:` map; both are what the
+    /// README documents, and neither is serde's derived enum encoding.
+    #[test]
+    fn intensity_is_written_the_way_the_readme_documents_it() {
+        assert_eq!(serde_json::to_string(&Intensity::Extreme).unwrap(), r#""extreme""#);
+
+        let encoded = serde_json::to_string(&Intensity::Custom(Intensity::Slow.curve())).unwrap();
+        assert!(encoded.starts_with(r#"{"custom":{"softness":"#), "got {encoded}");
     }
 
     #[test]
