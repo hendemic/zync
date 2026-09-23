@@ -250,10 +250,22 @@ pub fn check_config() -> Result<Config> {
     config::load_from(&config_path()?)
 }
 
+/// The config as it stands, parsed but not yet validated, for editing.
+///
+/// Unlike `check_config` this answers for a config that cannot be run, because
+/// that is the one the settings form most needs to open. A machine with no
+/// config file yet gets the commented example's values, so a first run lands on
+/// something worth editing rather than on an error.
+pub fn load_config_for_editing() -> Result<Config> {
+    let path = config_path()?;
+
+    match path.exists() {
+        true => config::load_unvalidated(&path),
+        false => config::example(),
+    }
+}
+
 /// Where a saved config landed and whether a running service will see it.
-// Allowed dead for now: the write path is in place ahead of the settings form
-// that calls it, and `pub` in a binary crate is not enough to count as used.
-#[allow(dead_code)]
 pub struct Saved {
     pub path: PathBuf,
     /// A running service read its config when it started and will not see this
@@ -266,7 +278,6 @@ pub struct Saved {
 /// For a UI that edits the config itself rather than handing it to an editor.
 /// The file keeps its comments and layout wherever the writer can manage it; see
 /// [`zync_adapters::config::save_to`] for what survives.
-#[allow(dead_code)]
 pub fn save_config(config: &Config) -> Result<Saved> {
     let path = config::save(config)?;
 

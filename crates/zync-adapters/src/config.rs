@@ -129,16 +129,37 @@ pub fn load_or_init() -> Result<Config> {
 }
 
 pub fn load_from(path: &Path) -> Result<Config> {
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let config: Config = serde_yaml::from_str(&contents)
-        .with_context(|| format!("Failed to parse {}; check its formatting", path.display()))?;
+    let config = load_unvalidated(path)?;
 
     config
         .validate()
         .with_context(|| format!("{} is not a usable configuration", path.display()))?;
 
     Ok(config)
+}
+
+/// Reads `path` without asking whether what it says can be run.
+///
+/// For an editor of the configuration rather than a user of it: a config with no
+/// lights in it is exactly the one somebody needs to open, and refusing to load
+/// it would leave them nothing to fix it with.
+pub fn load_unvalidated(path: &Path) -> Result<Config> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+
+    serde_yaml::from_str(&contents)
+        .with_context(|| format!("Failed to parse {}; check its formatting", path.display()))
+}
+
+/// The commented example, as a configuration.
+///
+/// What a settings editor opens on a machine with no config file yet, so a first
+/// run lands on the same sensible values the example carries rather than on an
+/// error or a screen full of zeroes. The values still point at a broker that
+/// does not exist, which is why this is not a default anything else falls back
+/// to.
+pub fn example() -> Result<Config> {
+    serde_yaml::from_str(EXAMPLE_CONFIG).context("The built-in example configuration is broken")
 }
 
 /// The config path, with the commented example written there first if there is

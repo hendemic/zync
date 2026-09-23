@@ -7,8 +7,10 @@
 //! keeps the two blocking operations, start and stop, off the drawing thread.
 
 use anyhow::{Error, Result};
+use zync_core::domain::Config;
 
-use crate::ops::{EditOutcome, LogLevel, Started, Status, Stopped};
+use crate::ops::{EditOutcome, LogLevel, Saved, Started, Status, Stopped};
+use crate::tui::settings::{Action, Settings};
 
 /// A key press, reduced to what the TUI acts on.
 ///
@@ -18,10 +20,13 @@ use crate::ops::{EditOutcome, LogLevel, Started, Status, Stopped};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Char(char),
+    Backspace,
     Enter,
     Esc,
     Up,
     Down,
+    Left,
+    Right,
     PageUp,
     PageDown,
     Home,
@@ -31,12 +36,21 @@ pub enum Key {
 }
 
 /// Work the event loop must do on the app's behalf.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// Not `Eq`, because a config carries floats. Two effects are still compared in
+/// tests, which is all `PartialEq` is here for.
+#[derive(Debug, PartialEq)]
 pub enum Effect {
     Start,
     Stop,
     /// Open, or re-open, the log follower at this level.
     Follow(LogLevel),
+    /// Read the config the settings form is about to show.
+    LoadSettings,
+    /// Write what the form now holds. Boxed because a config dwarfs every other
+    /// effect, and this enum is returned from every key press.
+    SaveSettings(Box<Config>),
+    /// Hand the config file to the user's editor.
     Edit,
     Quit,
 }
@@ -46,6 +60,7 @@ pub enum Effect {
 pub enum Screen {
     Home,
     Logs,
+    Settings,
 }
 
 /// An operation running on a worker thread. Start blocks for the best part of a
@@ -111,12 +126,12 @@ pub enum Item {
     Start,
     Stop,
     Logs,
-    Edit,
+    Settings,
     Quit,
 }
 
 impl Item {
-    pub const ALL: [Item; 5] = [Item::Start, Item::Stop, Item::Logs, Item::Edit, Item::Quit];
+    pub const ALL: [Item; 5] = [Item::Start, Item::Stop, Item::Logs, Item::Settings, Item::Quit];
 
     /// The letter that reaches this item without walking the menu. Shown in the
     /// label, so the menu doubles as its own key legend.
@@ -125,7 +140,7 @@ impl Item {
             Item::Start => 's',
             Item::Stop => 'x',
             Item::Logs => 'l',
-            Item::Edit => 'e',
+            Item::Settings => 'e',
             Item::Quit => 'q',
         }
     }
@@ -135,7 +150,7 @@ impl Item {
             Item::Start => "Start",
             Item::Stop => "Stop",
             Item::Logs => "Logs",
-            Item::Edit => "Edit settings",
+            Item::Settings => "Settings",
             Item::Quit => "Quit",
         }
     }
@@ -146,7 +161,7 @@ impl Item {
             Item::Start => "sync the lights in the background",
             Item::Stop => "stop syncing and fade the lights back",
             Item::Logs => "follow what this session is doing",
-            Item::Edit => "open the config in your editor",
+            Item::Settings => "change what zync connects to and how it syncs",
             Item::Quit => "leaves zync running",
         }
     }
@@ -240,6 +255,7 @@ pub struct App {
     pub message: String,
     pub busy: Option<Busy>,
     pub logs: Logs,
+    pub settings: Settings,
     /// Set once, and never unset: the event loop returns on seeing it.
     pub quit: bool,
 }
@@ -253,6 +269,7 @@ impl App {
             message: String::new(),
             busy: None,
             logs: Logs::default(),
+            settings: Settings::default(),
             quit: false,
         }
     }
@@ -278,6 +295,7 @@ impl App {
         match self.screen {
             Screen::Home => self.home_key(key),
             Screen::Logs => self.logs_key(key),
+            Screen::Settings => self.settings_key(key),
         }
     }
 
@@ -345,7 +363,11 @@ impl App {
                 self.screen = Screen::Logs;
                 Some(Effect::Follow(self.logs.level))
             }
-            Item::Edit => Some(Effect::Edit),
+            Item::Settings => {
+                self.screen = Screen::Settings;
+                self.settings.opening();
+                Some(Effect::LoadSettings)
+            }
             Item::Quit => {
                 self.quit = true;
                 Some(Effect::Quit)
@@ -382,6 +404,34 @@ impl App {
         None
     }
 
+    /// The form answers for itself; leaving it is the only thing it needs the
+    /// screen around it for.
+    fn settings_key(&mut self, key: Key) -> Option<Effect> {
+        match self.settings.on_key(key)? {
+            Action::Do(effect) => Some(effect),
+            Action::Leave => {
+                self.screen = Screen::Home;
+                None
+            }
+        }
+    }
+
+    /// Takes the config the settings form is to show.
+    pub fn settings_loaded(&mut self, outcome: Result<Config>) {
+        self.settings.loaded(outcome);
+    }
+
+    /// Takes what became of a save the form asked for.
+    pub fn settings_saved(&mut self, outcome: Result<Saved>) {
+        self.settings.saved(outcome);
+    }
+
+    /// Reports something that went wrong around the form rather than in it,
+    /// such as an editor that would not run.
+    pub fn settings_failed(&mut self, error: &Error) {
+        self.settings.failed(error);
+    }
+
     /// Takes the result of the start that was running on a worker thread.
     pub fn started(&mut self, outcome: Result<Started>) {
         self.busy = None;
@@ -394,7 +444,7 @@ impl App {
             // has only just been written — so say where to go next instead of
             // leaving `e` to be found.
             Err(e) if self.health.config_error.is_some() => {
-                format!("{} Press e for Edit settings.", one_line(&e))
+                format!("{} Press e for Settings.", one_line(&e))
             }
             Err(e) => one_line(&e),
         };
@@ -470,7 +520,7 @@ impl App {
 /// area one line high. Broken lines are joined with a dash rather than a space,
 /// since what follows one is a new sentence and would otherwise run into the
 /// path in front of it.
-fn one_line(error: &Error) -> String {
+pub(super) fn one_line(error: &Error) -> String {
     format!("{error:#}")
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -584,8 +634,8 @@ mod tests {
     fn a_hotkey_moves_the_cursor_to_its_item_and_activates_it() {
         let mut app = App::new(health(None));
         let effect = app.on_key(Key::Char('e'));
-        assert_eq!(app.selected, 3); // Edit
-        assert_eq!(effect, Some(Effect::Edit));
+        assert_eq!(app.selected, 3); // Settings
+        assert_eq!(effect, Some(Effect::LoadSettings));
     }
 
     #[test]
@@ -655,7 +705,7 @@ mod tests {
     fn logs_edit_and_quit_stay_enabled_even_while_busy() {
         let mut app = App::new(health(None));
         app.busy = Some(Busy::Starting);
-        for item in [Item::Logs, Item::Edit, Item::Quit] {
+        for item in [Item::Logs, Item::Settings, Item::Quit] {
             assert!(app.enabled(item));
         }
     }
@@ -670,11 +720,11 @@ mod tests {
     }
 
     #[test]
-    fn started_err_with_a_config_problem_points_at_edit_settings() {
+    fn started_err_with_a_config_problem_points_at_settings() {
         let mut app = App::new(health(None));
         app.health.config_error = Some("bad config".to_owned());
         app.started(Err(anyhow!("broker unreachable")));
-        assert_eq!(app.message, "broker unreachable Press e for Edit settings.");
+        assert_eq!(app.message, "broker unreachable Press e for Settings.");
     }
 
     #[test]

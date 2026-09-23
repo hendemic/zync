@@ -6,6 +6,7 @@
 //! operations — start, stop, the editor — from freezing the frame.
 
 mod app;
+mod settings;
 mod view;
 
 use anyhow::{Context, Result};
@@ -220,6 +221,13 @@ fn perform(
         Effect::Start => off_thread(finished, Done::Started, ops::start),
         Effect::Stop => off_thread(finished, Done::Stopped, ops::stop),
         Effect::Follow(level) => *follower = open_logs(app, level),
+        Effect::LoadSettings => load_settings(app),
+        // A write of one small file, so it answers well inside a frame and needs
+        // no thread of its own.
+        Effect::SaveSettings(config) => {
+            app.settings_saved(ops::save_config(&config));
+            app.health = health();
+        }
         Effect::Edit => edit(app, console)?,
         // Leaving is the loop's own business; it looks on the way round.
         Effect::Quit => {}
@@ -265,14 +273,34 @@ fn open_logs(app: &mut App, level: LogLevel) -> Option<LogFollower> {
 }
 
 /// Runs the editor on the real terminal, then takes it back.
+///
+/// The settings form is shown the file's new contents rather than a verdict on
+/// them: the two ways of editing the config lead to the same place, and the form
+/// must not go on showing what was there before the editor ran.
 fn edit(app: &mut App, console: &mut Console) -> Result<()> {
     let outcome = console.lend(ops::edit_config)?;
 
-    app.edited(outcome);
+    match app.screen {
+        // An editor that would not run has changed nothing, so the form is
+        // filled in from the file either way and only says what went wrong.
+        Screen::Settings => {
+            load_settings(app);
+            if let Err(e) = outcome {
+                app.settings_failed(&e);
+            }
+        }
+        _ => app.edited(outcome),
+    }
+
     // The instance name is read out of the config, so it may have just changed.
     app.health = health();
 
     Ok(())
+}
+
+/// Fills the settings form in from disk.
+fn load_settings(app: &mut App) {
+    app.settings_loaded(ops::load_config_for_editing());
 }
 
 /// What the header reports, with the reason in its place when even the paths
@@ -297,10 +325,13 @@ fn translate(event: KeyEvent) -> Option<Key> {
 
     let key = match event.code {
         KeyCode::Char(pressed) => Key::Char(pressed),
+        KeyCode::Backspace => Key::Backspace,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
         KeyCode::Home => Key::Home,
