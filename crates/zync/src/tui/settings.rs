@@ -483,6 +483,12 @@ impl Settings {
 
         let confirming = self.pending.take();
 
+        // A prompt that has been answered, either way, stops standing. Whatever
+        // asks again puts its own message back.
+        if confirming.is_some() {
+            self.say(String::new());
+        }
+
         if self.load_error.is_some() {
             return match key {
                 Key::Char('o') => Some(Action::Do(Effect::Edit)),
@@ -720,6 +726,9 @@ impl Settings {
             _ => return,
         }
 
+        // A value that has just moved answers whatever the last message
+        // complained about, so the complaint goes with it.
+        self.say(String::new());
         self.rebuild(Some(field));
     }
 
@@ -971,9 +980,18 @@ impl Settings {
             return;
         }
 
+        // A field reads better with the heading it belongs to above it, so the
+        // top of the window reaches one row further back when that row is a
+        // heading. The lower bound still wins, so the cursor is on the screen
+        // either way.
+        let context = match self.cursor.checked_sub(1) {
+            Some(above) if matches!(self.rows.get(above), Some(Row::Heading { .. })) => above,
+            _ => self.cursor,
+        };
+
         self.scroll = self
             .scroll
-            .min(self.cursor)
+            .min(context)
             .max((self.cursor + 1).saturating_sub(self.height))
             .min(self.rows.len().saturating_sub(self.height));
     }

@@ -35,9 +35,10 @@ const SETTINGS_KEYS: &str =
     " ↑/↓ move · Enter change · ←/→ cycle · a add · d delete · s save · o file · q back";
 const EDITING_KEYS: &str = " Enter keep · Esc cancel";
 
-/// Width of the settings form's label column, wide enough for the longest field
-/// name with a space after it.
-const SETTINGS_COLUMN: usize = 21;
+/// Width of the settings form's label column, counted from the left edge so
+/// that values line up however deeply a row is indented. Wide enough for the
+/// longest field name at the deepest indent, with a space after it.
+const SETTINGS_COLUMN: usize = 26;
 
 /// How far one level of indent moves a row in.
 const INDENT: usize = 2;
@@ -45,6 +46,10 @@ const INDENT: usize = 2;
 /// Rows the settings form's help line gets. Two, so that the longer
 /// explanations still fit on a narrow terminal.
 const HELP_HEIGHT: u16 = 2;
+
+/// Rows the settings form's message line gets. Also two, because what goes
+/// there includes a path and a reason a save failed.
+const NOTE_HEIGHT: u16 = 2;
 
 pub fn render(frame: &mut Frame, app: &mut App, painted: bool) {
     let palette = Palette::new(painted);
@@ -256,7 +261,7 @@ fn settings(frame: &mut Frame, form: &mut Settings, palette: &Palette) {
     let areas = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(HELP_HEIGHT),
-        Constraint::Length(1),
+        Constraint::Length(NOTE_HEIGHT),
     ])
     .split(frame.area());
 
@@ -289,13 +294,28 @@ fn settings(frame: &mut Frame, form: &mut Settings, palette: &Palette) {
             .collect(),
     };
 
-    frame.render_widget(Paragraph::new(body).block(block), areas[0]);
+    // Rows are one to a line, which is what keeps scrolling honest, so only the
+    // panel that has no rows in it — the one reporting a config that will not
+    // parse — is allowed to wrap.
+    let rows = Paragraph::new(body).block(block);
     frame.render_widget(
+        match form.load_error.is_some() {
+            true => rows.wrap(Wrap { trim: false }),
+            false => rows,
+        },
+        areas[0],
+    );
+    frame.render_widget(
+        // Not trimmed, so a help line that wraps keeps the indent the first
+        // line starts with.
         Paragraph::new(Line::styled(format!(" {}", form.help()), palette.dim()))
-            .wrap(Wrap { trim: true }),
+            .wrap(Wrap { trim: false }),
         areas[1],
     );
-    frame.render_widget(Paragraph::new(settings_footer(form, palette)), areas[2]);
+    frame.render_widget(
+        Paragraph::new(settings_footer(form, palette)).wrap(Wrap { trim: false }),
+        areas[2],
+    );
 }
 
 /// One row: a heading, the row that grows a section, or a field and its value.
