@@ -6,18 +6,25 @@
 //! reach the same behaviour without going through this file.
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use std::io::{BufWriter, Write};
+use clap::{CommandFactory, Parser, Subcommand};
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::Path;
 use std::thread;
 use zync_core::domain::Config;
 
 use crate::color;
+use crate::logline;
 use crate::ops;
+use crate::tui;
 
 /// How many lines `zync logs` shows when neither --session nor --lines says
 /// otherwise.
 const DEFAULT_LOG_LINES: usize = 40;
+
+/// clap's exit code for being called wrongly. Asking for the interface where
+/// there is no terminal to draw it on is the same class of mistake as leaving the
+/// subcommand off, so it is answered the same way.
+const USAGE_EXIT: i32 = 2;
 
 #[derive(Parser)]
 #[command(
@@ -26,8 +33,23 @@ const DEFAULT_LOG_LINES: usize = 40;
     about = "Drive Zigbee lights from what is on your screen"
 )]
 pub struct Cli {
+    /// Optional, because plain `zync` opens the interactive interface. Every
+    /// subcommand below is unchanged by that.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
+}
+
+impl Cli {
+    pub fn logging(&self) -> Logging {
+        self.command.as_ref().map_or(Logging::Silent, Command::logging)
+    }
+
+    pub fn run(self) -> Result<()> {
+        match self.command {
+            Some(command) => command.run(),
+            None => ui(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -63,6 +85,9 @@ pub enum Command {
         #[arg(long, short = 'n')]
         lines: Option<usize>,
     },
+    /// Open the interactive interface. The same as running `zync` with no
+    /// arguments; named so it can be written down in a script or a launcher.
+    Ui,
     /// Edit the configuration in your editor, and check what you saved.
     Config {
         /// Check the configuration without opening an editor. Exits non-zero if
@@ -108,8 +133,10 @@ impl Command {
             Command::Start { foreground: true } => Logging::Foreground,
             // `logs` is output. So is `config`: the editor takes over the
             // terminal it would log to, and `--path` is there to be piped into
-            // something else, which a stray warning line would corrupt.
-            Command::Logs { .. } | Command::Config { .. } => Logging::Silent,
+            // something else, which a stray warning line would corrupt. The
+            // interface draws over the whole terminal, so a log line landing on
+            // top of it would corrupt the frame.
+            Command::Logs { .. } | Command::Config { .. } | Command::Ui => Logging::Silent,
             _ => Logging::Client,
         }
     }
@@ -131,8 +158,24 @@ impl Command {
                 })
             }
             Command::Config { check, path } => config(check, path),
+            Command::Ui => ui(),
         }
     }
+}
+
+/// Opens the interactive interface, or explains itself when there is no terminal
+/// to draw it on.
+///
+/// Piped output means nobody is there to press a key, so this answers the way the
+/// command line used to when the subcommand was left off: usage on stderr, and a
+/// non-zero exit so a script notices.
+fn ui() -> Result<()> {
+    if !std::io::stdout().is_terminal() {
+        Cli::command().write_help(&mut std::io::stderr())?;
+        std::process::exit(USAGE_EXIT);
+    }
+
+    tui::run()
 }
 
 fn start() -> Result<()> {
@@ -272,53 +315,27 @@ fn report_config(path: &Path, validation: &Result<Config>, restart_needed: bool)
     }
 }
 
-/// The formatter's timestamp shape: RFC 3339 with a literal `Z`, e.g.
-/// `2026-08-24T06:42:01.006965Z`. Long enough, and specific enough, that the
-/// first word of a panic or another unrelated line will never satisfy it.
-fn looks_like_timestamp(token: &str) -> bool {
-    token.len() >= 20 && token.contains('T') && token.ends_with('Z')
-}
-
 /// Writes one line: the timestamp dimmed and italicised, the level token
 /// coloured by severity, everything else — target, message — passed through
 /// untouched.
 ///
-/// Both are found positionally rather than reconstructed from
-/// `split_whitespace`: the timestamp, if present, is the line's first token,
-/// and the level is the first token after it that matches a known severity. A
-/// line that is not shaped this way prints as-is rather than being guessed at.
+/// Where those pieces are is `logline`'s business, so a line of some other
+/// shape reassembles into itself and prints as it stands.
 fn write_line(out: &mut impl Write, line: &str, color: bool) -> Result<()> {
     if !color {
         writeln!(out, "{line}")?;
         return Ok(());
     }
 
-    let mut prefix = String::new();
-    let mut rest = line;
+    let parsed = logline::parse(line);
+    let timestamp = parsed
+        .timestamp
+        .map_or_else(String::new, |token| color::dim_italic(token, true));
+    let level = parsed
+        .level
+        .map_or_else(String::new, |severity| color::level(severity, true));
 
-    if let Some(ts_end) = line.find(char::is_whitespace) {
-        let candidate = &line[..ts_end];
-        if looks_like_timestamp(candidate) {
-            prefix = color::dim_italic(candidate, true);
-            rest = &line[ts_end..];
-        }
-    }
-
-    let level = rest
-        .split_whitespace()
-        .next()
-        .and_then(|token| color::level_code(token).map(|code| (token, code)))
-        .and_then(|(token, code)| rest.find(token).map(|at| (at, token, code)));
-
-    match level {
-        Some((at, token, code)) => writeln!(
-            out,
-            "{prefix}{}\x1b[{code}m{token}\x1b[0m{}",
-            &rest[..at],
-            &rest[at + token.len()..]
-        )?,
-        None => writeln!(out, "{prefix}{rest}")?,
-    }
+    writeln!(out, "{timestamp}{}{level}{}", parsed.gap, parsed.rest)?;
 
     Ok(())
 }
@@ -346,8 +363,8 @@ mod tests {
         let background = Cli::try_parse_from(["zync", "start"]).unwrap();
         let foreground = Cli::try_parse_from(["zync", "start", "--foreground"]).unwrap();
 
-        assert!(matches!(background.command, Command::Start { foreground: false }));
-        assert!(matches!(foreground.command, Command::Start { foreground: true }));
+        assert!(matches!(background.command, Some(Command::Start { foreground: false })));
+        assert!(matches!(foreground.command, Some(Command::Start { foreground: true })));
     }
 
     /// Checking and printing the path are both "don't open an editor", but they
@@ -404,6 +421,22 @@ mod tests {
             level: ops::LogLevel::Info,
             lines: None,
         }));
+
+        // The interface draws over the whole terminal, so it must not only leave
+        // the log file alone but log nowhere at all — by either name.
+        assert!(matches!(Command::Ui.logging(), Logging::Silent));
+        assert!(matches!(Cli { command: None }.logging(), Logging::Silent));
+    }
+
+    /// Plain `zync` is the interface; a subcommand still reaches the command it
+    /// always did.
+    #[test]
+    fn no_subcommand_parses_and_a_subcommand_still_wins() {
+        let bare = Cli::try_parse_from(["zync"]).unwrap();
+        let named = Cli::try_parse_from(["zync", "status"]).unwrap();
+
+        assert!(bare.command.is_none());
+        assert!(matches!(named.command, Some(Command::Status)));
     }
 
     #[test]
@@ -446,17 +479,18 @@ mod tests {
     /// RFC 3339 tokens qualify.
     #[test]
     fn a_short_first_word_is_not_treated_as_a_timestamp() {
-        assert!(!looks_like_timestamp("thread"));
-        assert!(looks_like_timestamp("2026-08-24T06:00:00.0Z"));
+        assert!(!logline::looks_like_timestamp("thread"));
+        assert!(logline::looks_like_timestamp("2026-08-24T06:00:00.0Z"));
     }
 
     #[test]
     fn every_written_level_has_a_distinct_colour() {
-        let codes: std::collections::HashSet<_> =
-            ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
-                .iter()
-                .map(|level| color::level_code(level).unwrap())
-                .collect();
+        use logline::Severity::{Debug, Error, Info, Trace, Warn};
+
+        let codes: std::collections::HashSet<_> = [Trace, Debug, Info, Warn, Error]
+            .into_iter()
+            .map(color::level_code)
+            .collect();
 
         assert_eq!(codes.len(), 5);
     }

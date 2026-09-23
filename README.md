@@ -28,6 +28,10 @@ Note: Fullscreen apps (games, fullscreen video) are captured on Gnome Wayland be
 ## Usage
 Build with `cargo build --release`; the binary is `zync`.
 
+Running `zync` on its own opens a terminal interface. It shows whether syncing is running, which instance name it registered under, and where the config and log files are; from there `s` starts, `x` stops, `l` follows this session's log, `e` opens the config in your editor, and `q` leaves without stopping anything. `zync ui` is the same thing under a name you can write down. Piped rather than run in a terminal, plain `zync` prints its usage instead.
+
+Everything it does is also a subcommand:
+
 ```
 zync start           # start syncing in the background, and give the terminal back
 zync status          # is it running?
@@ -156,6 +160,7 @@ performance:
 - Connects to MQTT broker and sends messages to Z2M to control lights
 - Support for Linux (X11 and Wayland) and macOS, one capture backend per platform behind a common interface
 - Runs as a background service: `zync start`, `zync status`, `zync logs`, `zync stop`. Stop reaches the running instance over MQTT, so it works from any terminal
+- A terminal interface on plain `zync`, over the same operations the subcommands use: start, stop, a following log view, and the config in your editor
 - Lights are returned to their previous state on stop. Each light's state is read back from Z2M at startup; lights that don't report one (groups, usually) fall back to a configured `fallback_state`
 - Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps, with a cut gate that snaps big jumps (cuts, explosions) even faster without changing the pacing of small, gradual changes. Tunable via `intensity` (`slow`, `normal`, `extreme`, or a custom curve).
 - Adaptive framerate driven by the light network itself. Zigbee2MQTT's log stream is monitored for delivery failures, and the send rate backs off whenever the mesh reports congestion. `percent_thread_work` remains as a secondary CPU guard (e.g. 10fps = 100ms thread time; 0.25 means 25ms of capture time will throttle the framerate).
@@ -171,7 +176,7 @@ Four crates, so the dependency direction is enforced by the compiler rather than
 zync-core       domain model, ports, sync loop, supervisor — no platform deps
 zync-capture    screen capture, one backend per platform
 zync-adapters   Zigbee2MQTT, MQTT bus, config on disk
-zync            the binary: logging, CLI
+zync            the binary: logging, CLI, terminal interface
 ```
 
 `zync-capture` is the only crate allowed to use `unsafe`; every other crate forbids it, so the native boundary stays confined to the capture backends. Nothing above that crate knows which backend is running.
