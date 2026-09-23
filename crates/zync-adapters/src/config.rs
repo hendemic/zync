@@ -133,6 +133,21 @@ pub fn load_from(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
+/// The config path, with the commented example written there first if there is
+/// nothing to open yet.
+///
+/// For `zync config`, which puts an editor on the file: a first run through there
+/// should land in the same annotated example `load_or_init` would have created,
+/// rather than an empty buffer. An existing file is never touched.
+pub fn ensure_config() -> Result<PathBuf> {
+    let path = config_path()?;
+
+    match path.exists() {
+        true => Ok(path),
+        false => write_example(&path),
+    }
+}
+
 fn write_example(path: &Path) -> Result<PathBuf> {
     // Running under sudo would write the example into root's home, where the
     // user will never find it, and the portal would refuse the session anyway.

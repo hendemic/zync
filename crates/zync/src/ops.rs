@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -28,6 +29,11 @@ const FLUSH_GRACE: Duration = Duration::from_millis(400);
 
 /// How long `stop` waits to see the service actually go away.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Where `edit_config` turns when neither VISUAL nor EDITOR says otherwise.
+/// Not friendly, but present on every Linux and macOS install, which is the
+/// only property a fallback needs.
+const FALLBACK_EDITOR: &str = "vi";
 
 /// What is known about this installation right now.
 pub struct Status {
@@ -180,4 +186,129 @@ pub fn stop_within(timeout: Duration) -> Result<Stopped> {
         exited: service::await_exit(timeout),
         instance,
     })
+}
+
+/// What became of an edit: where the file is, whether what was saved is usable,
+/// and whether anything has to be restarted for it to take effect.
+pub struct EditOutcome {
+    pub path: PathBuf,
+    /// The config as saved. A result rather than an error off the front of
+    /// `edit_config`, so a UI can show the problem and offer another go at the
+    /// file instead of unwinding the whole operation.
+    pub validation: Result<Config>,
+    /// A running service read its config when it started and will not see this
+    /// one.
+    pub restart_needed: bool,
+}
+
+/// Opens the config in the user's editor, waits for it, and reports on what was
+/// saved.
+///
+/// The commented example is written first if there is no file yet, so the editor
+/// always has something to open — the same file `zync start` would have created,
+/// which is why first run through here does not need a start first.
+pub fn edit_config() -> Result<EditOutcome> {
+    let path = config::ensure_config()?;
+    let command = editor_command(
+        readable_env("VISUAL").as_deref(),
+        readable_env("EDITOR").as_deref(),
+    );
+    // `editor_command` always yields at least the fallback, so this only guards
+    // against that stopping being true.
+    let (program, args) = command.split_first().context("No editor to run")?;
+
+    // The editor owns the terminal for as long as it runs, which is why this
+    // operation's command logs nowhere.
+    let status = Command::new(program)
+        .args(args)
+        .arg(&path)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| {
+            format!("Could not run `{program}`. Set VISUAL or EDITOR to an editor you have.")
+        })?;
+
+    // An editor that failed says nothing about the file, so neither do we: a
+    // "config is valid" line here would be about whatever was there before.
+    if !status.success() {
+        bail!(
+            "`{program}` exited with {status}; {} has not been checked.",
+            path.display()
+        );
+    }
+
+    Ok(EditOutcome {
+        restart_needed: service::running_pid().is_some(),
+        validation: config::load_from(&path),
+        path,
+    })
+}
+
+/// Loads and validates the config from the standard path.
+pub fn check_config() -> Result<Config> {
+    config::load_from(&config_path()?)
+}
+
+/// Where the config lives, whether or not it exists yet.
+pub fn config_path() -> Result<PathBuf> {
+    config::config_path()
+}
+
+/// A variable's value, with unset and not-valid-unicode treated alike: neither
+/// can be turned into a command, so both read as absent and the next choice gets
+/// its turn.
+fn readable_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// VISUAL, then EDITOR, then `vi`.
+///
+/// A value may carry arguments — `code --wait`, `emacsclient -nw` — so it is
+/// split on whitespace rather than taken as a bare program name. A value that is
+/// set but blank is treated as unset, since it names no editor either.
+fn editor_command(visual: Option<&str>, editor: Option<&str>) -> Vec<String> {
+    visual
+        .into_iter()
+        .chain(editor)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(|value| value.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_else(|| vec![FALLBACK_EDITOR.to_owned()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visual_wins_over_editor() {
+        assert_eq!(editor_command(Some("nvim"), Some("nano")), ["nvim"]);
+    }
+
+    #[test]
+    fn editor_is_used_when_visual_is_unset() {
+        assert_eq!(editor_command(None, Some("nano")), ["nano"]);
+    }
+
+    #[test]
+    fn neither_set_falls_back_to_an_editor_every_platform_has() {
+        assert_eq!(editor_command(None, None), [FALLBACK_EDITOR]);
+    }
+
+    /// `EDITOR="code --wait"` is the common shape that a bare program name
+    /// would try to exec as one long filename.
+    #[test]
+    fn arguments_in_the_value_are_kept_as_arguments() {
+        assert_eq!(editor_command(Some("code --wait"), None), ["code", "--wait"]);
+    }
+
+    /// An exported but empty value names no editor, so it must not shadow the
+    /// next choice.
+    #[test]
+    fn a_blank_value_is_treated_as_unset() {
+        assert_eq!(editor_command(Some("   "), Some("nano")), ["nano"]);
+        assert_eq!(editor_command(Some(""), None), [FALLBACK_EDITOR]);
+    }
 }

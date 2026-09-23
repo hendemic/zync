@@ -8,7 +8,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::thread;
+use zync_core::domain::Config;
 
 use crate::color;
 use crate::ops;
@@ -61,6 +63,16 @@ pub enum Command {
         #[arg(long, short = 'n')]
         lines: Option<usize>,
     },
+    /// Edit the configuration in your editor, and check what you saved.
+    Config {
+        /// Check the configuration without opening an editor. Exits non-zero if
+        /// it is not usable.
+        #[arg(long, conflicts_with = "path")]
+        check: bool,
+        /// Print the path to the configuration file and nothing else.
+        #[arg(long)]
+        path: bool,
+    },
     /// The detached service process. Not for direct use.
     #[command(name = "__daemon", hide = true)]
     Daemon,
@@ -94,7 +106,10 @@ impl Command {
         match self {
             Command::Daemon => Logging::Service,
             Command::Start { foreground: true } => Logging::Foreground,
-            Command::Logs { .. } => Logging::Silent,
+            // `logs` is output. So is `config`: the editor takes over the
+            // terminal it would log to, and `--path` is there to be piped into
+            // something else, which a stray warning line would corrupt.
+            Command::Logs { .. } | Command::Config { .. } => Logging::Silent,
             _ => Logging::Client,
         }
     }
@@ -115,6 +130,7 @@ impl Command {
                     follow,
                 })
             }
+            Command::Config { check, path } => config(check, path),
         }
     }
 }
@@ -205,6 +221,57 @@ fn tail(view: ops::LogView) -> Result<()> {
     }
 }
 
+fn config(check: bool, path_only: bool) -> Result<()> {
+    if path_only {
+        println!("{}", ops::config_path()?.display());
+        return Ok(());
+    }
+
+    if check {
+        // Reported as an error rather than as output, so a script gets the
+        // non-zero exit and the message lands on stderr with every other
+        // failure.
+        let config = ops::check_config()?;
+        report_config(&ops::config_path()?, &Ok(config), false);
+
+        return Ok(());
+    }
+
+    let outcome = ops::edit_config()?;
+    report_config(&outcome.path, &outcome.validation, outcome.restart_needed);
+
+    Ok(())
+}
+
+/// Says whether what is on disk is usable.
+///
+/// A bad config is printed rather than returned as an error: after an edit it is
+/// something to go and fix, not a failed command, and the error's own context
+/// already names the file and what was wrong with it.
+fn report_config(path: &Path, validation: &Result<Config>, restart_needed: bool) {
+    let painted = color::enabled();
+
+    match validation {
+        Ok(_) => {
+            println!("The config at {} is {}.", path.display(), color::green("valid", painted));
+
+            if restart_needed {
+                println!(
+                    "  {}",
+                    color::dim("zync is running; it takes effect on the next `zync start`", painted)
+                );
+            }
+        }
+        Err(e) => {
+            // The error's own context names the file, so the headline does not
+            // repeat it.
+            println!("The config is {}:", color::yellow("not usable", painted));
+            println!("  {e:#}");
+            println!("  {}", color::dim("run `zync config` again to fix it", painted));
+        }
+    }
+}
+
 /// The formatter's timestamp shape: RFC 3339 with a literal `Z`, e.g.
 /// `2026-08-24T06:42:01.006965Z`. Long enough, and specific enough, that the
 /// first word of a panic or another unrelated line will never satisfy it.
@@ -283,6 +350,15 @@ mod tests {
         assert!(matches!(foreground.command, Command::Start { foreground: true }));
     }
 
+    /// Checking and printing the path are both "don't open an editor", but they
+    /// answer different questions and combining them would print two things.
+    #[test]
+    fn checking_and_printing_the_config_path_are_mutually_exclusive() {
+        assert!(Cli::try_parse_from(["zync", "config", "--check", "--path"]).is_err());
+        assert!(Cli::try_parse_from(["zync", "config", "--check"]).is_ok());
+        assert!(Cli::try_parse_from(["zync", "config", "--path"]).is_ok());
+    }
+
     #[test]
     fn plain_follow_scopes_to_the_current_session() {
         assert!(scope_to_session(true, false, None));
@@ -320,6 +396,7 @@ mod tests {
         assert!(!writes_file(Command::Start { foreground: false }));
         assert!(!writes_file(Command::Stop));
         assert!(!writes_file(Command::Status));
+        assert!(!writes_file(Command::Config { check: false, path: false }));
         assert!(!writes_file(Command::Logs {
             follow: false,
             session: false,
