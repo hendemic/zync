@@ -4801,7 +4801,7 @@ dependencies = [
 
 [[package]]
 name = "zync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4820,7 +4820,7 @@ dependencies = [
 
 [[package]]
 name = "zync-adapters"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -4835,7 +4835,7 @@ dependencies = [
 
 [[package]]
 name = "zync-capture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4859,7 +4859,7 @@ dependencies = [
 
 [[package]]
 name = "zync-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
