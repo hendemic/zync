@@ -48,10 +48,9 @@ pub struct Status {
     /// must not stop status from answering the question it was asked; the
     /// instance above is still resolved, from the hostname if need be.
     ///
-    /// The CLI reads nothing out of it — its `status` output is fixed — but a
-    /// front end that can show the config itself, or the reason it is unusable,
-    /// should not have to load it a second time to do so.
-    #[allow(dead_code, reason = "part of the operation's answer, not every caller's question")]
+    /// The CLI reads nothing out of it — its `status` output is fixed — but the
+    /// TUI shows the reason a config is unusable in its header, and should not
+    /// have to load the file a second time to do so.
     pub config: Result<Config>,
 }
 

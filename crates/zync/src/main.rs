@@ -14,6 +14,7 @@ mod color;
 mod logline;
 mod ops;
 mod service;
+mod tui;
 
 use cli::Logging;
 
@@ -38,9 +39,9 @@ fn main() -> Result<()> {
 
     // Held for the life of the process: dropping it stops the background writer,
     // and anything not yet written is lost.
-    let _guard = init_logging(cli.command.logging())?;
+    let _guard = init_logging(cli.logging())?;
 
-    cli.command.run()
+    cli.run()
 }
 
 /// Sets up logging for the kind of process this is.
