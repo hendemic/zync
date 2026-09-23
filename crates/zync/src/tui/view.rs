@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use crate::logline::{self, Severity};
 use crate::ops::LogLevel;
 use crate::tui::app::{App, Health, Item, Logs, Screen};
+use crate::tui::settings::{Field, Kind, Row, Settings};
 
 /// Width of the header's label column, so the values line up under each other.
 const LABEL_COLUMN: usize = 9;
@@ -28,12 +29,30 @@ const MESSAGE_HEIGHT: u16 = 5;
 /// there is only ever one of the two worth reading.
 const LOG_KEYS: &str = " ↑/↓ scroll · PgUp/PgDn page · G bottom · v info/debug · q back";
 
+/// The settings form's key legend, and the shorter one shown while a value is
+/// being typed, when almost none of the above is a key any more.
+const SETTINGS_KEYS: &str =
+    " ↑/↓ move · Enter change · ←/→ cycle · a add · d delete · s save · o file · q back";
+const EDITING_KEYS: &str = " Enter keep · Esc cancel";
+
+/// Width of the settings form's label column, wide enough for the longest field
+/// name with a space after it.
+const SETTINGS_COLUMN: usize = 21;
+
+/// How far one level of indent moves a row in.
+const INDENT: usize = 2;
+
+/// Rows the settings form's help line gets. Two, so that the longer
+/// explanations still fit on a narrow terminal.
+const HELP_HEIGHT: u16 = 2;
+
 pub fn render(frame: &mut Frame, app: &mut App, painted: bool) {
     let palette = Palette::new(painted);
 
     match app.screen {
         Screen::Home => home(frame, app, &palette),
         Screen::Logs => logs(frame, &mut app.logs, &palette),
+        Screen::Settings => settings(frame, &mut app.settings, &palette),
     }
 }
 
@@ -228,6 +247,143 @@ fn level_name(level: LogLevel) -> &'static str {
     }
 }
 
+/// The settings form: a scrollable list of rows, the selected field's meaning,
+/// and what just happened.
+///
+/// Which fields exist, what they are called and how each one is changed are all
+/// the form's business; this draws whatever rows it is given.
+fn settings(frame: &mut Frame, form: &mut Settings, palette: &Palette) {
+    let areas = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(HELP_HEIGHT),
+        Constraint::Length(1),
+    ])
+    .split(frame.area());
+
+    let title = match form.dirty() {
+        true => " settings · unsaved changes ",
+        false => " settings ",
+    };
+    let block = panel(title, palette);
+    let height = block.inner(areas[0]).height as usize;
+
+    // Everything about scrolling depends on how much room the border left.
+    form.resize(height);
+
+    let body: Vec<Line> = match &form.load_error {
+        Some(problem) => vec![
+            Line::styled(problem.as_str(), palette.problem()),
+            Line::raw(""),
+            Line::styled(
+                "The form can only show a config that parses. Press o to fix it in your editor.",
+                palette.dim(),
+            ),
+        ],
+        None => form
+            .rows()
+            .iter()
+            .enumerate()
+            .skip(form.scroll())
+            .take(height)
+            .map(|(index, row)| settings_row(form, row, index == form.cursor(), palette))
+            .collect(),
+    };
+
+    frame.render_widget(Paragraph::new(body).block(block), areas[0]);
+    frame.render_widget(
+        Paragraph::new(Line::styled(format!(" {}", form.help()), palette.dim()))
+            .wrap(Wrap { trim: true }),
+        areas[1],
+    );
+    frame.render_widget(Paragraph::new(settings_footer(form, palette)), areas[2]);
+}
+
+/// One row: a heading, the row that grows a section, or a field and its value.
+fn settings_row<'a>(
+    form: &'a Settings,
+    row: &'a Row,
+    selected: bool,
+    palette: &Palette,
+) -> Line<'a> {
+    let indent = " ".repeat(1 + row.indent() * INDENT);
+
+    match row {
+        Row::Heading { text, .. } => Line::from(vec![
+            Span::raw(indent),
+            Span::styled(text.as_str(), palette.heading()),
+        ]),
+        Row::Add { group, .. } => Line::from(vec![
+            Span::raw(indent),
+            Span::raw(form.add_label(*group)),
+        ])
+        .style(match selected {
+            true => palette.selected(),
+            false => palette.dim(),
+        }),
+        Row::Field { field, .. } => settings_field(form, *field, selected, indent, palette),
+    }
+}
+
+/// A field's label and value, or its label and the buffer being typed into it.
+///
+/// A row being typed into is not reversed the way a selected one is: the block
+/// cursor inside it is the thing to look at, and a reversed row would bury it.
+fn settings_field<'a>(
+    form: &'a Settings,
+    field: Field,
+    selected: bool,
+    indent: String,
+    palette: &Palette,
+) -> Line<'a> {
+    let column = SETTINGS_COLUMN.saturating_sub(indent.len());
+    let mut spans = vec![
+        Span::raw(indent),
+        Span::styled(pad(form.label(field), column), palette.dim()),
+    ];
+
+    match form.editing().filter(|edit| edit.field == field) {
+        Some(edit) => {
+            let (before, under, after) = edit.split();
+            spans.push(Span::raw(before));
+            // An empty cell stands in for the cursor at the end of the buffer,
+            // where there is no character to reverse.
+            spans.push(Span::styled(
+                match under.is_empty() {
+                    true => " ",
+                    false => under,
+                },
+                palette.selected(),
+            ));
+            spans.push(Span::raw(after));
+
+            return Line::from(spans);
+        }
+        None => spans.push(match form.kind(field) {
+            Kind::ReadOnly => Span::styled(form.display(field), palette.disabled()),
+            _ => Span::raw(form.display(field)),
+        }),
+    }
+
+    Line::from(spans).style(match selected {
+        true => palette.selected(),
+        false => Style::new(),
+    })
+}
+
+/// What just happened, or the key legend when nothing has.
+fn settings_footer<'a>(form: &'a Settings, palette: &Palette) -> Line<'a> {
+    let keys = match form.editing().is_some() {
+        true => EDITING_KEYS,
+        false => SETTINGS_KEYS,
+    };
+
+    match (form.note.is_empty(), form.problem) {
+        (true, _) => Line::styled(keys, palette.dim()),
+        (false, true) => Line::styled(format!(" {}", form.note), palette.problem()),
+        (false, false) => Line::raw(format!(" {}", form.note)),
+    }
+}
+
 /// The frame every panel sits in.
 fn panel<'a>(title: &'a str, palette: &Palette) -> Block<'a> {
     let block = Block::bordered()
@@ -281,6 +437,13 @@ impl Palette {
 
     fn dim(&self) -> Style {
         self.of(Style::new().add_modifier(Modifier::DIM))
+    }
+
+    /// A section title in the settings form. Bold rather than coloured, so the
+    /// sections read as structure and the hotkeys keep the colour to
+    /// themselves.
+    fn heading(&self) -> Style {
+        self.of(Style::new().add_modifier(Modifier::BOLD))
     }
 
     fn key(&self) -> Style {
