@@ -254,15 +254,12 @@ pub fn check_config() -> Result<Config> {
 ///
 /// Unlike `check_config` this answers for a config that cannot be run, because
 /// that is the one the settings form most needs to open. A machine with no
-/// config file yet gets the commented example's values, so a first run lands on
-/// something worth editing rather than on an error.
+/// config file yet has the commented example written first and then read back,
+/// so a first run lands on something worth editing — and the first save from
+/// the form splices into that example rather than rendering a file from
+/// scratch, which is what keeps its comments on disk.
 pub fn load_config_for_editing() -> Result<Config> {
-    let path = config_path()?;
-
-    match path.exists() {
-        true => config::load_unvalidated(&path),
-        false => config::example(),
-    }
+    config::load_unvalidated(&config::ensure_config()?)
 }
 
 /// Where a saved config landed and whether a running service will see it.

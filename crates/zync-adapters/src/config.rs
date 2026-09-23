@@ -151,17 +151,6 @@ pub fn load_unvalidated(path: &Path) -> Result<Config> {
         .with_context(|| format!("Failed to parse {}; check its formatting", path.display()))
 }
 
-/// The commented example, as a configuration.
-///
-/// What a settings editor opens on a machine with no config file yet, so a first
-/// run lands on the same sensible values the example carries rather than on an
-/// error or a screen full of zeroes. The values still point at a broker that
-/// does not exist, which is why this is not a default anything else falls back
-/// to.
-pub fn example() -> Result<Config> {
-    serde_yaml::from_str(EXAMPLE_CONFIG).context("The built-in example configuration is broken")
-}
-
 /// The config path, with the commented example written there first if there is
 /// nothing to open yet.
 ///
