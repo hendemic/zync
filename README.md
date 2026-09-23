@@ -28,18 +28,29 @@ Note: Fullscreen apps (games, fullscreen video) are captured on Gnome Wayland be
 ## Usage
 Build with `cargo build --release`; the binary is `zync`.
 
+Running `zync` on its own opens a terminal interface. It shows whether syncing is running, which instance name it registered under, and where the config and log files are; from there `s` starts, `x` stops, `l` follows this session's log, `e` opens the settings, and `q` leaves without stopping anything. `zync ui` is the same thing under a name you can write down. Piped rather than run in a terminal, plain `zync` prints its usage instead.
+
+`e` opens a form over the config: move with ↑/↓, `Enter` changes the field you are on, ←/→ cycle a choice, `a` and `d` add and remove a light or a zone, and `s` writes the file back with its comments intact. `o` hands the file to your editor from inside the form, which is still the way to reach a light's `fallback_state`.
+
+Everything it does is also a subcommand:
+
 ```
 zync start           # start syncing in the background, and give the terminal back
 zync status          # is it running?
 zync logs -f         # follow what it is doing
 zync stop            # stop syncing and fade the lights back
+zync config          # edit the config in your editor, and check what you saved
 
 zync start -f        # run in this terminal instead, logging as it goes
+zync config --check  # check the config without opening an editor
+zync config --path   # print where the config lives
 ```
 
 `zync start` detaches into its own session, so it keeps running after you close the shell. Use `-f`/`--foreground` when you want to watch it directly.
 
 On first run `zync start` creates a commented config at `~/.config/zync/config.yaml` and exits so you can fill in your broker and lights. Config problems are reported by `zync start` itself rather than only landing in a log.
+
+`zync config` opens that file in `$VISUAL`, `$EDITOR`, or `vi`, and says whether what you saved is usable — including on a fresh install, where it writes the commented example first so there is something to edit. The config is only read when syncing starts, so a running service keeps the settings it started with until the next `zync start`.
 
 Stopping — with `zync stop`, with Ctrl-C on a foreground run, or with `kill` on the service — fades the lights back over five seconds to whatever they were showing before syncing started. `on_stop` in the config chooses that behaviour.
 
@@ -56,11 +67,11 @@ The instance name defaults to your hostname, so pointing two machines at the sam
 Set `instance:` in the config only if you want a name other than the hostname.
 
 ### Files
-Paths below are the Linux ones. macOS has no XDG state directory, so both the config and the state land under `~/Library/Application Support/zync/` instead. `zync status` prints the resolved config and log paths for the machine you are on.
+Paths below are the Linux ones. macOS has no XDG state directory, so both the config and the state land under `~/Library/Application Support/zync/` instead. `zync status` prints the resolved config and log paths for the machine you are on, and `zync config --path` prints the config path on its own.
 
 | Path | Owner |
 |---|---|
-| `~/.config/zync/config.yaml` | you |
+| `~/.config/zync/config.yaml` | you — `zync config` opens it in your editor. The app also writes it when you change settings from the interface, editing only the lines it has to and leaving your comments in place. The `lights:` and `zones:` blocks are the exception: those are rewritten whole, so comments inside them are lost |
 | `~/.local/state/zync/state.json` | the app — currently the screencast portal's restore token (Linux only) |
 | `~/.local/state/zync/zync.pid` | the app — the running service, so `status` and `stop` can find it |
 | `~/.local/state/zync/logs/zync.<date>.log` | the app — daily rotation, seven files kept. This is what `zync logs` reads |
@@ -93,6 +104,21 @@ downsample_factor: 20       # pixel stride, in native display pixels
 #   off      turn every light off
 #   hold     leave the lights on the last colour they were sent
 on_stop: restore
+
+# How aggressively big colour jumps (cuts, explosions) are shortened relative to
+# small, gradual changes:
+#   slow     gentle fades throughout — good for film and ambient content
+#   normal   the default balance (default if omitted)
+#   extreme  snaps almost instantly on cuts — good for fast-paced games
+# A custom curve is also accepted in place of a preset name:
+#   intensity:
+#     custom:
+#       softness: 0.4          # falloff shape for small/gradual changes
+#       cut_midpoint: 0.4      # normalized colour distance (0-1) where the cut kicks in
+#       cut_steepness: 14.0    # how sharply transitions shorten past cut_midpoint
+#       min_transition: 0.15   # fastest allowed transition, in seconds (Zigbee rounds to tenths; below 0.1 is an instant jump)
+#       max_transition: 1.0    # slowest allowed transition, in seconds
+intensity: normal
 
 lights:
   - light_name: "your_device_name"    # Must match the device name in Z2M. Can be a Z2M group or single light
@@ -136,11 +162,12 @@ performance:
 - Connects to MQTT broker and sends messages to Z2M to control lights
 - Support for Linux (X11 and Wayland) and macOS, one capture backend per platform behind a common interface
 - Runs as a background service: `zync start`, `zync status`, `zync logs`, `zync stop`. Stop reaches the running instance over MQTT, so it works from any terminal
+- A terminal interface on plain `zync`, over the same operations the subcommands use: start, stop, a following log view, and the config in your editor
 - Lights are returned to their previous state on stop. Each light's state is read back from Z2M at startup; lights that don't report one (groups, usually) fall back to a configured `fallback_state`
-- Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps.
+- Dynamic transition and brightness based on screen changes. Slow transition for colors close in distance; fast for big jumps, with a cut gate that snaps big jumps (cuts, explosions) even faster without changing the pacing of small, gradual changes. Tunable via `intensity` (`slow`, `normal`, `extreme`, or a custom curve).
 - Adaptive framerate driven by the light network itself. Zigbee2MQTT's log stream is monitored for delivery failures, and the send rate backs off whenever the mesh reports congestion. `percent_thread_work` remains as a secondary CPU guard (e.g. 10fps = 100ms thread time; 0.25 means 25ms of capture time will throttle the framerate).
   - Earlier versions throttled on CPU work time alone. That only ever worked on X11, where a screen grab is genuinely expensive; on Wayland the capture is a cheap buffer read, so the loop never backed off and flooded the Zigbee mesh instead.
-- `max_commands_per_sec` puts a hard ceiling on commands reaching the mesh, independent of framerate. Zone updates that exceed the budget stay pending rather than being dropped.
+- `max_commands_per_sec` puts a hard ceiling on commands reaching the mesh, independent of framerate. Zone updates that exceed the budget stay pending rather than being dropped, and zones that change on the same frame are sent together or held together, so a synchronized scene change doesn't reach one light noticeably before another.
 - Rotating log files, and the Wayland monitor picker only appears once — the portal's restore token is persisted.
 - Multiple machines can sync against one broker; each is namespaced by its hostname unless `instance` says otherwise.
 
@@ -151,7 +178,7 @@ Four crates, so the dependency direction is enforced by the compiler rather than
 zync-core       domain model, ports, sync loop, supervisor — no platform deps
 zync-capture    screen capture, one backend per platform
 zync-adapters   Zigbee2MQTT, MQTT bus, config on disk
-zync            the binary: logging, CLI
+zync            the binary: logging, CLI, terminal interface
 ```
 
 `zync-capture` is the only crate allowed to use `unsafe`; every other crate forbids it, so the native boundary stays confined to the capture backends. Nothing above that crate knows which backend is running.
@@ -162,14 +189,23 @@ zync            the binary: logging, CLI
 - A TUI for creating zones visually.
 - Windows capture backend.
 - Capture card feed for Raspi + HDMI capture card feed for TV support.
-- User controls over aesthetics through abstractions or direct variables (e.g. "intensity: high" uses a preconfigured transition settings. The user could override them in the config).
 
 ### Other ideas in consideration
 - Hue Gradient and other "segment" lights. Requires reworking the zone-to-light mapping into a many-to-one relationship of zones to a light's segments.
-- `zync config` and `zync doctor` subcommands.
+- `zync doctor` subcommand.
 - A systemd user unit, so syncing can start with the session.
 
 ## Troubleshooting
+
+### Checking the config
+
+```
+zync config          # edit it, and hear whether what you saved is usable
+zync config --check  # check what is already there, without opening an editor
+zync config --path   # print the path, for opening it some other way
+```
+
+`--check` exits non-zero when the config cannot be used, so it can gate a script. A parse error names the line and column where it gave up; a config that parses but asks for something impossible — a zone pointing at a light that is not defined, say — is reported as that instead.
 
 ### Checking what the capture is doing
 
