@@ -478,3 +478,464 @@ fn one_line(error: &Error) -> String {
         .collect::<Vec<_>>()
         .join(" — ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+    use std::path::PathBuf;
+    use zync_core::domain::{
+        Config, Intensity, LightId, LightService, LightSpec, MqttConfig, PerformanceConfig,
+        StopPolicy, Zone,
+    };
+
+    fn health(pid: Option<u32>) -> Health {
+        Health {
+            pid,
+            instance: "porch".to_owned(),
+            config_path: "/config.toml".to_owned(),
+            log_path: "/logs".to_owned(),
+            config_error: None,
+        }
+    }
+
+    /// A config that passes validation. Only its shape matters here, not any
+    /// particular value, so it is built the way zync-core's own tests build one.
+    fn config() -> Config {
+        Config {
+            mqtt: MqttConfig {
+                name: "t".into(),
+                broker: "localhost".into(),
+                port: 1883,
+                user: None,
+                password: None,
+            },
+            lights: vec![LightSpec {
+                service: LightService::Zigbee2MQTT,
+                light_name: LightId::new("lamp"),
+                brightness: 1.0,
+                is_group: false,
+                max_updates_per_sec: None,
+                fallback_state: None,
+            }],
+            zones: vec![Zone {
+                name: "all".into(),
+                x: 0,
+                y: 0,
+                width: 16,
+                height: 16,
+                light_name: LightId::new("lamp"),
+            }],
+            downsample_factor: 1,
+            performance: PerformanceConfig {
+                max_fps: 60,
+                max_delay: 500,
+                refresh_threshold: 10,
+                percent_thread_work: 0.25,
+                fps_reporting: 3600,
+                max_commands_per_sec: 20.0,
+            },
+            on_stop: StopPolicy::Restore,
+            instance: None,
+            intensity: Intensity::Normal,
+        }
+    }
+
+    fn lines(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("line {i}")).collect()
+    }
+
+    /// Switches to the log screen and installs a page of lines, the way the
+    /// event loop does after `Effect::Follow` comes back.
+    fn open_logs(app: &mut App, contents: Vec<String>, height: usize) {
+        app.on_key(Key::Char('l'));
+        app.logs_opened(Ok(contents));
+        app.logs.resize(height);
+    }
+
+    #[test]
+    fn arrow_keys_move_the_home_cursor_with_wraparound() {
+        let mut app = App::new(health(None));
+        app.on_key(Key::Up);
+        assert_eq!(app.selected, Item::ALL.len() - 1);
+        app.on_key(Key::Down);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn j_and_k_move_the_home_cursor_like_the_arrow_keys() {
+        let mut app = App::new(health(None));
+        app.on_key(Key::Char('j'));
+        assert_eq!(app.selected, 1);
+        app.on_key(Key::Char('k'));
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn enter_activates_the_selected_item() {
+        let mut app = App::new(health(None));
+        app.selected = 2; // Logs
+        let effect = app.on_key(Key::Enter);
+        assert_eq!(effect, Some(Effect::Follow(LogLevel::Info)));
+        assert_eq!(app.screen, Screen::Logs);
+    }
+
+    #[test]
+    fn a_hotkey_moves_the_cursor_to_its_item_and_activates_it() {
+        let mut app = App::new(health(None));
+        let effect = app.on_key(Key::Char('e'));
+        assert_eq!(app.selected, 3); // Edit
+        assert_eq!(effect, Some(Effect::Edit));
+    }
+
+    #[test]
+    fn s_starts_when_not_running_and_not_busy() {
+        let mut app = App::new(health(None));
+        let effect = app.on_key(Key::Char('s'));
+        assert_eq!(effect, Some(Effect::Start));
+        assert_eq!(app.busy, Some(Busy::Starting));
+        assert_eq!(app.message, "Starting…");
+    }
+
+    #[test]
+    fn s_does_nothing_and_explains_when_already_running() {
+        let mut app = App::new(health(Some(42)));
+        let effect = app.on_key(Key::Char('s'));
+        assert_eq!(effect, None);
+        assert_eq!(app.message, "zync is already running (pid 42).");
+        assert_eq!(app.busy, None);
+    }
+
+    #[test]
+    fn a_second_press_while_busy_yields_nothing() {
+        let mut app = App::new(health(None));
+        app.on_key(Key::Char('s'));
+        assert_eq!(app.on_key(Key::Char('s')), None);
+        assert_eq!(app.on_key(Key::Char('x')), None);
+    }
+
+    #[test]
+    fn x_stops_when_running() {
+        let mut app = App::new(health(Some(7)));
+        let effect = app.on_key(Key::Char('x'));
+        assert_eq!(effect, Some(Effect::Stop));
+        assert_eq!(app.busy, Some(Busy::Stopping));
+        assert_eq!(app.message, "Stopping…");
+    }
+
+    #[test]
+    fn x_does_nothing_and_explains_when_not_running() {
+        let mut app = App::new(health(None));
+        let effect = app.on_key(Key::Char('x'));
+        assert_eq!(effect, None);
+        assert_eq!(app.message, "zync is not running, so there is nothing to stop.");
+    }
+
+    #[test]
+    fn start_is_disabled_while_running_or_busy() {
+        let mut app = App::new(health(Some(1)));
+        assert!(!app.enabled(Item::Start));
+        app.health.pid = None;
+        assert!(app.enabled(Item::Start));
+        app.busy = Some(Busy::Starting);
+        assert!(!app.enabled(Item::Start));
+    }
+
+    #[test]
+    fn stop_is_disabled_while_not_running_or_busy() {
+        let mut app = App::new(health(None));
+        assert!(!app.enabled(Item::Stop));
+        app.health.pid = Some(1);
+        assert!(app.enabled(Item::Stop));
+        app.busy = Some(Busy::Stopping);
+        assert!(!app.enabled(Item::Stop));
+    }
+
+    #[test]
+    fn logs_edit_and_quit_stay_enabled_even_while_busy() {
+        let mut app = App::new(health(None));
+        app.busy = Some(Busy::Starting);
+        for item in [Item::Logs, Item::Edit, Item::Quit] {
+            assert!(app.enabled(item));
+        }
+    }
+
+    #[test]
+    fn started_ok_clears_busy_and_reports_pid_and_instance() {
+        let mut app = App::new(health(None));
+        app.busy = Some(Busy::Starting);
+        app.started(Ok(Started { pid: 99, instance: "porch".to_owned() }));
+        assert_eq!(app.busy, None);
+        assert_eq!(app.message, "Started (pid 99, instance porch).");
+    }
+
+    #[test]
+    fn started_err_with_a_config_problem_points_at_edit_settings() {
+        let mut app = App::new(health(None));
+        app.health.config_error = Some("bad config".to_owned());
+        app.started(Err(anyhow!("broker unreachable")));
+        assert_eq!(app.message, "broker unreachable Press e for Edit settings.");
+    }
+
+    #[test]
+    fn started_err_without_a_config_problem_has_no_edit_hint() {
+        let mut app = App::new(health(None));
+        app.started(Err(anyhow!("broker unreachable")));
+        assert_eq!(app.message, "broker unreachable");
+    }
+
+    #[test]
+    fn stopped_ok_exited_reports_the_lights_fading_back() {
+        let mut app = App::new(health(Some(1)));
+        app.busy = Some(Busy::Stopping);
+        app.stopped(Ok(Stopped { instance: "porch".to_owned(), exited: true }));
+        assert_eq!(app.busy, None);
+        assert_eq!(app.message, "Stopped zync (porch); the lights are fading back.");
+    }
+
+    #[test]
+    fn stopped_ok_still_running_points_at_the_logs() {
+        let mut app = App::new(health(Some(1)));
+        app.stopped(Ok(Stopped { instance: "porch".to_owned(), exited: false }));
+        assert_eq!(
+            app.message,
+            "Asked zync (porch) to stop but it is still running. Press l for the logs."
+        );
+    }
+
+    #[test]
+    fn stopped_err_reports_the_error() {
+        let mut app = App::new(health(Some(1)));
+        app.stopped(Err(anyhow!("mqtt timed out")));
+        assert_eq!(app.message, "mqtt timed out");
+    }
+
+    #[test]
+    fn edited_valid_and_restart_needed_says_so() {
+        let mut app = App::new(health(None));
+        app.edited(Ok(EditOutcome {
+            path: PathBuf::from("/cfg.toml"),
+            validation: Ok(config()),
+            restart_needed: true,
+        }));
+        assert_eq!(
+            app.message,
+            "The config at /cfg.toml is valid; zync is running, so it takes effect on the next start."
+        );
+    }
+
+    #[test]
+    fn edited_valid_without_a_restart_needed() {
+        let mut app = App::new(health(None));
+        app.edited(Ok(EditOutcome {
+            path: PathBuf::from("/cfg.toml"),
+            validation: Ok(config()),
+            restart_needed: false,
+        }));
+        assert_eq!(app.message, "The config at /cfg.toml is valid.");
+    }
+
+    #[test]
+    fn edited_validation_error_explains_the_problem() {
+        let mut app = App::new(health(None));
+        app.edited(Ok(EditOutcome {
+            path: PathBuf::from("/cfg.toml"),
+            validation: Err(anyhow!("no lights configured")),
+            restart_needed: false,
+        }));
+        assert_eq!(app.message, "The config is not usable: no lights configured");
+    }
+
+    #[test]
+    fn edited_outer_error_is_reported_plainly() {
+        let mut app = App::new(health(None));
+        app.edited(Err(anyhow!("could not run the editor")));
+        assert_eq!(app.message, "could not run the editor");
+    }
+
+    #[test]
+    fn q_on_home_quits() {
+        let mut app = App::new(health(None));
+        let effect = app.on_key(Key::Char('q'));
+        assert!(app.quit);
+        assert_eq!(effect, Some(Effect::Quit));
+    }
+
+    #[test]
+    fn interrupt_quits_from_either_screen() {
+        let mut app = App::new(health(None));
+        assert_eq!(app.on_key(Key::Interrupt), Some(Effect::Quit));
+        assert!(app.quit);
+
+        let mut app = App::new(health(None));
+        app.on_key(Key::Char('l'));
+        assert_eq!(app.on_key(Key::Interrupt), Some(Effect::Quit));
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn l_opens_logs_and_asks_to_follow_at_info() {
+        let mut app = App::new(health(None));
+        let effect = app.on_key(Key::Char('l'));
+        assert_eq!(app.screen, Screen::Logs);
+        assert_eq!(effect, Some(Effect::Follow(LogLevel::Info)));
+    }
+
+    #[test]
+    fn q_and_esc_return_home_from_logs_without_an_effect() {
+        let mut app = App::new(health(None));
+        app.on_key(Key::Char('l'));
+        assert_eq!(app.on_key(Key::Char('q')), None);
+        assert_eq!(app.screen, Screen::Home);
+
+        app.on_key(Key::Char('l'));
+        assert_eq!(app.on_key(Key::Esc), None);
+        assert_eq!(app.screen, Screen::Home);
+    }
+
+    #[test]
+    fn v_toggles_info_and_debug_and_asks_to_refollow() {
+        let mut app = App::new(health(None));
+        app.on_key(Key::Char('l'));
+
+        let effect = app.on_key(Key::Char('v'));
+        assert_eq!(app.logs.level, LogLevel::Debug);
+        assert_eq!(effect, Some(Effect::Follow(LogLevel::Debug)));
+
+        let effect = app.on_key(Key::Char('v'));
+        assert_eq!(app.logs.level, LogLevel::Info);
+        assert_eq!(effect, Some(Effect::Follow(LogLevel::Info)));
+    }
+
+    #[test]
+    fn shift_g_and_end_jump_to_the_tail() {
+        let mut app = App::new(health(None));
+        app.on_key(Key::Char('l'));
+
+        app.logs.tail = false;
+        app.on_key(Key::Char('G'));
+        assert!(app.logs.tail);
+
+        app.logs.tail = false;
+        app.on_key(Key::End);
+        assert!(app.logs.tail);
+    }
+
+    #[test]
+    fn g_and_home_scroll_to_the_top_and_stop_tailing() {
+        let mut app = App::new(health(None));
+        open_logs(&mut app, lines(50), 10);
+
+        app.on_key(Key::Char('g'));
+        assert_eq!(app.logs.scroll, 0);
+        assert!(!app.logs.tail);
+
+        app.logs.tail = true;
+        app.on_key(Key::Home);
+        assert_eq!(app.logs.scroll, 0);
+        assert!(!app.logs.tail);
+    }
+
+    #[test]
+    fn visible_shows_the_last_page_after_opening_and_resizing() {
+        let mut app = App::new(health(None));
+        let content = lines(25);
+        open_logs(&mut app, content.clone(), 10);
+        assert_eq!(app.logs.visible(), &content[15..25]);
+    }
+
+    #[test]
+    fn scrolling_up_clears_tail_and_moves_the_window() {
+        let mut app = App::new(health(None));
+        open_logs(&mut app, lines(25), 10);
+        assert!(app.logs.tail);
+        assert_eq!(app.logs.scroll, 15);
+
+        app.on_key(Key::Up);
+        assert!(!app.logs.tail);
+        assert_eq!(app.logs.scroll, 14);
+    }
+
+    #[test]
+    fn scrolling_down_to_the_end_re_enables_tail() {
+        let mut app = App::new(health(None));
+        open_logs(&mut app, lines(25), 10);
+        app.on_key(Key::Up);
+        app.on_key(Key::Down);
+        assert!(app.logs.tail);
+        assert_eq!(app.logs.scroll, 15);
+    }
+
+    #[test]
+    fn appending_while_tailing_keeps_the_view_on_the_bottom_after_resize() {
+        let mut app = App::new(health(None));
+        open_logs(&mut app, lines(10), 10);
+        app.logs_appended(vec!["a".to_owned(), "b".to_owned()]);
+        app.logs.resize(10);
+        assert!(app.logs.tail);
+        assert_eq!(app.logs.scroll, 2);
+        assert_eq!(app.logs.visible().last(), Some(&"b".to_owned()));
+    }
+
+    #[test]
+    fn appending_while_not_tailing_leaves_scroll_where_it_was() {
+        let mut app = App::new(health(None));
+        open_logs(&mut app, lines(25), 10);
+        app.on_key(Key::Up);
+        assert_eq!(app.logs.scroll, 14);
+
+        app.logs_appended(vec!["new".to_owned()]);
+        assert_eq!(app.logs.scroll, 14);
+    }
+
+    #[test]
+    fn resize_clamps_scroll_so_it_never_points_past_the_end() {
+        let mut app = App::new(health(None));
+        open_logs(&mut app, lines(25), 5);
+        app.on_key(Key::Up);
+        assert_eq!(app.logs.scroll, 19);
+
+        app.logs.resize(20);
+        assert_eq!(app.logs.scroll, 5);
+    }
+
+    #[test]
+    fn at_bottom_is_true_only_at_the_last_page() {
+        let mut app = App::new(health(None));
+        open_logs(&mut app, lines(25), 10);
+        assert!(app.logs.at_bottom());
+
+        app.on_key(Key::Up);
+        assert!(!app.logs.at_bottom());
+    }
+
+    #[test]
+    fn logs_opened_err_records_the_problem_and_clears_lines() {
+        let mut app = App::new(health(None));
+        app.logs_opened(Ok(lines(5)));
+        app.logs_opened(Err(anyhow!("log file vanished")));
+        assert_eq!(app.logs.problem.as_deref(), Some("log file vanished"));
+        assert!(app.logs.lines.is_empty());
+    }
+
+    #[test]
+    fn logs_failed_records_the_problem_without_clearing_lines() {
+        let mut app = App::new(health(None));
+        app.logs_opened(Ok(lines(5)));
+        app.logs_failed(&anyhow!("reader closed"));
+        assert_eq!(app.logs.problem.as_deref(), Some("reader closed"));
+        assert_eq!(app.logs.lines.len(), 5);
+    }
+
+    /// `{error:#}` joins the context chain with `: `, but a message can still
+    /// carry its own newline — the first-run message does — and each of those
+    /// becomes its own line, joined back with a dash rather than a space.
+    #[test]
+    fn one_line_joins_embedded_newlines_with_a_dash_and_normalises_whitespace() {
+        let error = anyhow!("root cause").context("first   line\nsecond line").context("outer");
+        assert_eq!(
+            one_line(&error),
+            "outer: first line — second line: root cause"
+        );
+    }
+}
