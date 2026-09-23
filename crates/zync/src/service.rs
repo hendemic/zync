@@ -6,15 +6,13 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use tracing::debug;
 use zync_adapters::config;
-
-use crate::color;
 
 /// Hidden subcommand the detached child is launched with.
 pub const DAEMON_COMMAND: &str = "__daemon";
@@ -23,8 +21,9 @@ pub const DAEMON_COMMAND: &str = "__daemon";
 /// Both sides read it from here so rewording the message cannot break the flag.
 pub const SESSION_MARKER: &str = "session starting";
 
-/// How often `logs --follow` looks for new output.
-const FOLLOW_INTERVAL: Duration = Duration::from_millis(250);
+/// How often `logs --follow` looks for new output. A follower does no waiting of
+/// its own, so this is a suggestion to whoever drives it.
+pub const FOLLOW_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Long enough for a bad config or an unreachable broker to have killed the
 /// child, so `start` can say so instead of claiming success.
@@ -247,42 +246,95 @@ fn selected<'a>(contents: &'a str, view: &LogView) -> Vec<&'a str> {
     }
 }
 
-/// Prints the tail of the current log file, optionally following it.
+/// A print-free reader for the log file: the history that was asked for, then
+/// whatever is appended to it, whenever the caller asks.
 ///
-/// Rotation is handled by re-resolving the newest file as it goes, so a follow
-/// running across midnight keeps working.
-pub fn tail(view: LogView) -> Result<()> {
-    let dir = config::log_dir()?;
-    let mut path = newest_log(&dir)
-        .ok_or_else(|| anyhow!("No log files yet in {}. Has zync run?", dir.display()))?;
+/// Polling rather than blocking, so a caller with an event loop of its own stays
+/// in charge of when it reads. What to do with the lines, and how often to ask
+/// for more, is nobody's business here.
+pub struct LogFollower {
+    dir: PathBuf,
+    path: PathBuf,
+    file: File,
+    /// How much of `path` has been handed out already.
+    offset: u64,
+    level: LogLevel,
+}
 
-    let stdout = std::io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+impl LogFollower {
+    /// Opens the log file, returning the follower along with the history `view`
+    /// selected.
+    ///
+    /// `view.follow` is not consulted: whether to keep polling is a decision for
+    /// the caller, not for the reader.
+    pub fn open(view: LogView) -> Result<(Self, Vec<String>)> {
+        let dir = config::log_dir()?;
+        let path = newest_log(&dir)
+            .ok_or_else(|| anyhow!("No log files yet in {}. Has zync run?", dir.display()))?;
 
-    let mut file = File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
-    let mut offset = print_history(&mut file, &view, &mut out)?;
-    out.flush()?;
+        let mut file =
+            File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .context("Failed to read the log file")?;
 
-    if !view.follow {
-        return Ok(());
+        let history = selected(&contents, &view)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let follower = LogFollower {
+            dir,
+            path,
+            file,
+            offset: contents.len() as u64,
+            level: view.level,
+        };
+
+        Ok((follower, history))
     }
 
-    loop {
-        thread::sleep(FOLLOW_INTERVAL);
-
-        // Midnight rotation moves the writer to a new file, so re-resolve rather
-        // than follow a file nothing is appending to any more.
-        if let Some(newest) = newest_log(&dir)
-            && newest != path
+    /// Whatever has been appended since the last poll, filtered by the level
+    /// asked for at `open`. Empty when nothing has been written.
+    ///
+    /// Rotation is handled by re-resolving the newest file as it goes, so a
+    /// follow running across midnight keeps working rather than watching a file
+    /// nothing appends to any more.
+    pub fn poll(&mut self) -> Result<Vec<String>> {
+        if let Some(newest) = newest_log(&self.dir)
+            && newest != self.path
         {
-            path = newest;
-            file =
-                File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
-            offset = 0;
+            self.file = File::open(&newest)
+                .with_context(|| format!("Failed to open {}", newest.display()))?;
+            self.path = newest;
+            self.offset = 0;
         }
 
-        offset = print_appended(&mut file, offset, view.level, &mut out)?;
-        out.flush()?;
+        let length = self
+            .file
+            .metadata()
+            .context("Failed to stat the log file")?
+            .len();
+
+        // A shorter file means it was rotated or truncated underneath us.
+        if length < self.offset {
+            self.offset = 0;
+        }
+        if length == self.offset {
+            return Ok(Vec::new());
+        }
+
+        self.file.seek(SeekFrom::Start(self.offset))?;
+        let mut appended = String::new();
+        self.file
+            .read_to_string(&mut appended)
+            .context("Failed to read the log file")?;
+        self.offset += appended.len() as u64;
+
+        Ok(appended
+            .lines()
+            .filter(|line| included(line, self.level))
+            .map(str::to_owned)
+            .collect())
     }
 }
 
@@ -307,97 +359,6 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
                 .is_some_and(|name| name.starts_with("zync.") && name.ends_with(".log"))
         })
         .max()
-}
-
-/// The formatter's timestamp shape: RFC 3339 with a literal `Z`, e.g.
-/// `2026-08-24T06:42:01.006965Z`. Long enough, and specific enough, that the
-/// first word of a panic or another unrelated line will never satisfy it.
-fn looks_like_timestamp(token: &str) -> bool {
-    token.len() >= 20 && token.contains('T') && token.ends_with('Z')
-}
-
-/// Writes one line: the timestamp dimmed and italicised, the level token
-/// coloured by severity, everything else — target, message — passed through
-/// untouched.
-///
-/// Both are found positionally rather than reconstructed from
-/// `split_whitespace`: the timestamp, if present, is the line's first token,
-/// and the level is the first token after it that matches a known severity. A
-/// line that is not shaped this way prints as-is rather than being guessed at.
-fn write_line(out: &mut impl Write, line: &str, color: bool) -> Result<()> {
-    if !color {
-        writeln!(out, "{line}")?;
-        return Ok(());
-    }
-
-    let mut prefix = String::new();
-    let mut rest = line;
-
-    if let Some(ts_end) = line.find(char::is_whitespace) {
-        let candidate = &line[..ts_end];
-        if looks_like_timestamp(candidate) {
-            prefix = color::dim_italic(candidate, true);
-            rest = &line[ts_end..];
-        }
-    }
-
-    let level = rest
-        .split_whitespace()
-        .next()
-        .and_then(|token| color::level_code(token).map(|code| (token, code)))
-        .and_then(|(token, code)| rest.find(token).map(|at| (at, token, code)));
-
-    match level {
-        Some((at, token, code)) => writeln!(
-            out,
-            "{prefix}{}\x1b[{code}m{token}\x1b[0m{}",
-            &rest[..at],
-            &rest[at + token.len()..]
-        )?,
-        None => writeln!(out, "{prefix}{rest}")?,
-    }
-
-    Ok(())
-}
-
-fn print_history(file: &mut File, view: &LogView, out: &mut impl Write) -> Result<u64> {
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)
-        .context("Failed to read the log file")?;
-
-    let color = color::enabled();
-    for line in selected(&contents, view) {
-        write_line(out, line, color)?;
-    }
-
-    Ok(contents.len() as u64)
-}
-
-fn print_appended(
-    file: &mut File,
-    offset: u64,
-    level: LogLevel,
-    out: &mut impl Write,
-) -> Result<u64> {
-    let length = file.metadata().context("Failed to stat the log file")?.len();
-
-    // A shorter file means it was rotated or truncated underneath us.
-    let start = if length < offset { 0 } else { offset };
-    if length == start {
-        return Ok(start);
-    }
-
-    file.seek(SeekFrom::Start(start))?;
-    let mut appended = String::new();
-    file.read_to_string(&mut appended)
-        .context("Failed to read the log file")?;
-
-    let color = color::enabled();
-    for line in appended.lines().filter(|line| included(line, level)) {
-        write_line(out, line, color)?;
-    }
-
-    Ok(start + appended.len() as u64)
 }
 
 #[cfg(test)]
@@ -515,61 +476,6 @@ mod tests {
         assert_eq!(selected(contents, &view(LogLevel::Error, false, 10)).len(), 1);
     }
 
-    #[test]
-    fn the_timestamp_is_dimmed_and_the_level_coloured() {
-        let line = "2026-08-24T06:00:00.0Z ERROR zync::cli: something broke";
-        let mut out = Vec::new();
-
-        write_line(&mut out, line, true).unwrap();
-
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "\x1b[2;3m2026-08-24T06:00:00.0Z\x1b[0m \x1b[31;1mERROR\x1b[0m zync::cli: something broke\n"
-        );
-    }
-
-    #[test]
-    fn color_disabled_writes_the_line_unchanged() {
-        let line = "2026-08-24T06:00:00.0Z ERROR zync::cli: something broke";
-        let mut out = Vec::new();
-
-        write_line(&mut out, line, false).unwrap();
-
-        assert_eq!(String::from_utf8(out).unwrap(), format!("{line}\n"));
-    }
-
-    /// A line with no readable level or timestamp — a panic, a wrapped line —
-    /// must still be printed, just without colour, rather than dropped or
-    /// mangled.
-    #[test]
-    fn a_line_without_a_recognised_shape_is_left_uncoloured() {
-        let line = "thread 'main' panicked at src/lib.rs:1:1";
-        let mut out = Vec::new();
-
-        write_line(&mut out, line, true).unwrap();
-
-        assert_eq!(String::from_utf8(out).unwrap(), format!("{line}\n"));
-    }
-
-    /// A short first word must not be mistaken for a timestamp — only genuine
-    /// RFC 3339 tokens qualify.
-    #[test]
-    fn a_short_first_word_is_not_treated_as_a_timestamp() {
-        assert!(!looks_like_timestamp("thread"));
-        assert!(looks_like_timestamp("2026-08-24T06:00:00.0Z"));
-    }
-
-    #[test]
-    fn every_written_level_has_a_distinct_colour() {
-        let codes: std::collections::HashSet<_> =
-            ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
-                .iter()
-                .map(|level| color::level_code(level).unwrap())
-                .collect();
-
-        assert_eq!(codes.len(), 5);
-    }
-
     /// Regression: the appender writes `zync.<date>.log`, and an earlier filter
     /// looked for `zync.log.<date>`, which matched nothing at all.
     #[test]
@@ -594,21 +500,6 @@ mod tests {
         assert_eq!(
             newest_log(&dir.0).unwrap().file_name().unwrap(),
             "zync.2026-08-24.log"
-        );
-    }
-
-    /// The formatter right-aligns levels to five columns, so INFO and WARN
-    /// arrive with a leading space that has to survive colouring.
-    #[test]
-    fn the_level_padding_is_preserved() {
-        let line = "2026-08-24T06:00:00.0Z  INFO zync::cli: hello";
-        let mut out = Vec::new();
-
-        write_line(&mut out, line, true).unwrap();
-
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "\x1b[2;3m2026-08-24T06:00:00.0Z\x1b[0m  \x1b[32mINFO\x1b[0m zync::cli: hello\n"
         );
     }
 
