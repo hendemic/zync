@@ -13,6 +13,7 @@ use std::thread;
 use zync_core::domain::Config;
 
 use crate::color;
+use crate::logline;
 use crate::ops;
 
 /// How many lines `zync logs` shows when neither --session nor --lines says
@@ -272,53 +273,27 @@ fn report_config(path: &Path, validation: &Result<Config>, restart_needed: bool)
     }
 }
 
-/// The formatter's timestamp shape: RFC 3339 with a literal `Z`, e.g.
-/// `2026-08-24T06:42:01.006965Z`. Long enough, and specific enough, that the
-/// first word of a panic or another unrelated line will never satisfy it.
-fn looks_like_timestamp(token: &str) -> bool {
-    token.len() >= 20 && token.contains('T') && token.ends_with('Z')
-}
-
 /// Writes one line: the timestamp dimmed and italicised, the level token
 /// coloured by severity, everything else — target, message — passed through
 /// untouched.
 ///
-/// Both are found positionally rather than reconstructed from
-/// `split_whitespace`: the timestamp, if present, is the line's first token,
-/// and the level is the first token after it that matches a known severity. A
-/// line that is not shaped this way prints as-is rather than being guessed at.
+/// Where those pieces are is `logline`'s business, so a line of some other
+/// shape reassembles into itself and prints as it stands.
 fn write_line(out: &mut impl Write, line: &str, color: bool) -> Result<()> {
     if !color {
         writeln!(out, "{line}")?;
         return Ok(());
     }
 
-    let mut prefix = String::new();
-    let mut rest = line;
+    let parsed = logline::parse(line);
+    let timestamp = parsed
+        .timestamp
+        .map_or_else(String::new, |token| color::dim_italic(token, true));
+    let level = parsed
+        .level
+        .map_or_else(String::new, |severity| color::level(severity, true));
 
-    if let Some(ts_end) = line.find(char::is_whitespace) {
-        let candidate = &line[..ts_end];
-        if looks_like_timestamp(candidate) {
-            prefix = color::dim_italic(candidate, true);
-            rest = &line[ts_end..];
-        }
-    }
-
-    let level = rest
-        .split_whitespace()
-        .next()
-        .and_then(|token| color::level_code(token).map(|code| (token, code)))
-        .and_then(|(token, code)| rest.find(token).map(|at| (at, token, code)));
-
-    match level {
-        Some((at, token, code)) => writeln!(
-            out,
-            "{prefix}{}\x1b[{code}m{token}\x1b[0m{}",
-            &rest[..at],
-            &rest[at + token.len()..]
-        )?,
-        None => writeln!(out, "{prefix}{rest}")?,
-    }
+    writeln!(out, "{timestamp}{}{level}{}", parsed.gap, parsed.rest)?;
 
     Ok(())
 }
@@ -446,17 +421,18 @@ mod tests {
     /// RFC 3339 tokens qualify.
     #[test]
     fn a_short_first_word_is_not_treated_as_a_timestamp() {
-        assert!(!looks_like_timestamp("thread"));
-        assert!(looks_like_timestamp("2026-08-24T06:00:00.0Z"));
+        assert!(!logline::looks_like_timestamp("thread"));
+        assert!(logline::looks_like_timestamp("2026-08-24T06:00:00.0Z"));
     }
 
     #[test]
     fn every_written_level_has_a_distinct_colour() {
-        let codes: std::collections::HashSet<_> =
-            ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
-                .iter()
-                .map(|level| color::level_code(level).unwrap())
-                .collect();
+        use logline::Severity::{Debug, Error, Info, Trace, Warn};
+
+        let codes: std::collections::HashSet<_> = [Trace, Debug, Info, Warn, Error]
+            .into_iter()
+            .map(color::level_code)
+            .collect();
 
         assert_eq!(codes.len(), 5);
     }
