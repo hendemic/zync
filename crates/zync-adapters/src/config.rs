@@ -194,9 +194,9 @@ pub fn save(config: &Config) -> Result<PathBuf> {
 /// An invalid config is never written, and the write itself goes through a
 /// temporary file so an interrupted save cannot leave half a config behind.
 pub fn save_to(path: &Path, config: &Config) -> Result<()> {
-    config
-        .validate()
-        .with_context(|| format!("Refusing to write an unusable configuration to {}", path.display()))?;
+    config.validate().with_context(|| {
+        format!("Refusing to write an unusable configuration to {}", path.display())
+    })?;
 
     // Every step is allowed to give up: an unreadable file, a layout the splicer
     // does not understand, and a splice that did not come back out as the config

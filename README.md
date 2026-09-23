@@ -69,7 +69,7 @@ Paths below are the Linux ones. macOS has no XDG state directory, so both the co
 
 | Path | Owner |
 |---|---|
-| `~/.config/zync/config.yaml` | you — `zync config` opens it in your editor |
+| `~/.config/zync/config.yaml` | you — `zync config` opens it in your editor. The app also writes it when you change settings from the interface, editing only the lines it has to and leaving your comments in place. The `lights:` and `zones:` blocks are the exception: those are rewritten whole, so comments inside them are lost |
 | `~/.local/state/zync/state.json` | the app — currently the screencast portal's restore token (Linux only) |
 | `~/.local/state/zync/zync.pid` | the app — the running service, so `status` and `stop` can find it |
 | `~/.local/state/zync/logs/zync.<date>.log` | the app — daily rotation, seven files kept. This is what `zync logs` reads |

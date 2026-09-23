@@ -250,6 +250,32 @@ pub fn check_config() -> Result<Config> {
     config::load_from(&config_path()?)
 }
 
+/// Where a saved config landed and whether a running service will see it.
+// Allowed dead for now: the write path is in place ahead of the settings form
+// that calls it, and `pub` in a binary crate is not enough to count as used.
+#[allow(dead_code)]
+pub struct Saved {
+    pub path: PathBuf,
+    /// A running service read its config when it started and will not see this
+    /// one. The same thing `edit_config` reports, for the same reason.
+    pub restart_needed: bool,
+}
+
+/// Validates and writes the config. An invalid config is an error, not a write.
+///
+/// For a UI that edits the config itself rather than handing it to an editor.
+/// The file keeps its comments and layout wherever the writer can manage it; see
+/// [`zync_adapters::config::save_to`] for what survives.
+#[allow(dead_code)]
+pub fn save_config(config: &Config) -> Result<Saved> {
+    let path = config::save(config)?;
+
+    Ok(Saved {
+        path,
+        restart_needed: service::running_pid().is_some(),
+    })
+}
+
 /// Where the config lives, whether or not it exists yet.
 pub fn config_path() -> Result<PathBuf> {
     config::config_path()

@@ -52,7 +52,8 @@ pub(super) fn splice(existing: &str, config: &Config) -> Result<String> {
                 // the blank line that was separating it behind.
                 let mut start = entry.start;
                 let mut end = entry.end;
-                if replacement.is_empty() && lines[end..].iter().all(|line| line.trim().is_empty()) {
+                let at_end = lines[end..].iter().all(|line| line.trim().is_empty());
+                if replacement.is_empty() && at_end {
                     end = lines.len();
                     while start > 0 && lines[start - 1].trim().is_empty() {
                         start -= 1;
@@ -518,14 +519,18 @@ fn parts<'a>(line: &'a str, key: &str) -> Option<(&'a str, &'a str, &'a str, &'a
 fn comment_start(text: &str) -> usize {
     let mut quote = None;
     let mut previous = ' ';
+    let mut started = false;
 
     for (index, c) in text.char_indices() {
         match (quote, c) {
             (Some(open), c) if c == open => quote = None,
-            (None, '"' | '\'') => quote = Some(c),
+            // Only a quote opening the value quotes it. One further in belongs to
+            // a plain scalar, where an apostrophe is just an apostrophe.
+            (None, '"' | '\'') if !started => quote = Some(c),
             (None, '#') if previous.is_whitespace() => return index,
             _ => (),
         }
+        started |= !c.is_whitespace();
         previous = c;
     }
 
